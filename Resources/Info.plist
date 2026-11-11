@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+<key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+<key>CFBundleName</key><string>工作留声</string>
+<key>CFBundleDisplayName</key><string>工作留声</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
+<key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
+<key>LSMinimumSystemVersion</key><string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+<key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>NSBluetoothAlwaysUsageDescription</key><string>工作留声通过蓝牙查看录音卡状态，并在你开启实时文字时接收音频。录音开始与结束由设备操作。</string>
+<key>NSRemovableVolumesUsageDescription</key><string>工作留声从通过 USB 连接的录音卡复制完整录音，保存到你的 Mac。</string>
+<key>NSDocumentsFolderUsageDescription</key><string>工作留声将完整录音、对话剪辑和文字保存在你选择的本地资料库。</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSSpeechRecognitionUsageDescription</key><string>工作留声使用苹果本地听写，将录音卡音频显示为桌面字幕。</string>
+<key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+<key>CFBundleLocalizations</key><array><string>zh_CN</string></array>
+</dict></plist>

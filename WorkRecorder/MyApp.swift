@@ -1,9 +1,9 @@
 import SwiftUI
+import WorkdayMac
 
-@main struct MyApp: App {
-    var body: some Scene {
-        WindowGroup {
-            ContentView()
-        }
-    }
+@main
+enum WorkRecorderLauncher {
+  @MainActor static func main() {
+    WorkdayApp.main()
+  }
 }
