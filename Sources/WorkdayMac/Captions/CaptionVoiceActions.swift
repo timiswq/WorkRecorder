@@ -5,7 +5,7 @@ extension DesktopCaption {
   var actionAnchor: String { "buttons.\(id).\(voiceID ?? "").\(identityControls?.rawValue ?? "")" }
 }
 
-/// Only the button's rectangle intercepts clicks over the user's active application.
+/// A nonactivating mouse target limited to the visible bubble or one of its controls.
 @MainActor class CaptionControlPanel: NSPanel {
   override var canBecomeKey: Bool { false }
   override var canBecomeMain: Bool { false }

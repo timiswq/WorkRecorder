@@ -18,6 +18,7 @@ struct CaptionDisplay: Identifiable, Equatable {
   private(set) var panel: CaptionPanel?
   private(set) var voiceActions: [String: CaptionVoiceActions] = [:]
   private(set) var closeButton: CaptionClosePanel?
+  private var dismissPanels: [String: CaptionDismissPanel] = [:]
   private weak var model: AppModel?
   private var subscription: AnyCancellable?
   private var speechSubscription: AnyCancellable?
@@ -103,6 +104,7 @@ struct CaptionDisplay: Identifiable, Equatable {
     transition += 1
     panel?.orderOut(nil)
     clearHoverControls()
+    clearDismissPanels()
     lastHoverPoint = nil
     panel?.close()
     panel = nil
@@ -235,6 +237,39 @@ struct CaptionDisplay: Identifiable, Equatable {
     closeButton = nil
   }
 
+  private func clearDismissPanels() {
+    for target in dismissPanels.values { target.detach() }
+    dismissPanels.removeAll()
+  }
+
+  private func updateDismissPanels(for content: [DesktopCaption], in panel: CaptionPanel) {
+    let visible = Set(content.map(\.id))
+    for id in dismissPanels.keys.filter({ !visible.contains($0) }) {
+      dismissPanels.removeValue(forKey: id)?.detach()
+    }
+    for caption in content {
+      guard let bubble = panel.anchor(for: caption.id), panel.frame.contains(bubble) else {
+        dismissPanels.removeValue(forKey: caption.id)?.detach()
+        continue
+      }
+      let target: CaptionDismissPanel
+      if let existing = dismissPanels[caption.id] {
+        target = existing
+      } else {
+        target = CaptionDismissPanel(captionID: caption.id)
+        dismissPanels[caption.id] = target
+        target.onDismiss = { [weak self, weak target] in
+          guard let self, let target, self.dismissPanels[target.captionID] === target else { return }
+          self.lastHoverPoint = NSEvent.mouseLocation
+          self.dismissCaption(id: target.captionID)
+        }
+      }
+      // Reserve the identity region even during the interval before its hover control appears.
+      let identity = caption.identityControls == nil ? nil : panel.anchor(for: caption.actionAnchor)
+      target.show(in: panel, bubble: bubble, identityFrame: identity)
+    }
+  }
+
   private func hoveredCaption(in panel: CaptionPanel, captions: [DesktopCaption], at pointer: NSPoint)
     -> (DesktopCaption, NSRect)? {
     // The badge is a child window. Its outer edge can extend past the caption panel,
@@ -256,9 +291,13 @@ struct CaptionDisplay: Identifiable, Equatable {
     if previousHoverPoint != pointer { lastHoverPoint = nil }
     guard let panel, panel.isVisible,
           let (caption, bubble) = hoveredCaption(in: panel, captions: captions, at: pointer) else {
+      // Preserve the hovered opacity while the last sentence finishes fading out.
+      if !captions.isEmpty { panel?.feedView.alphaValue = 1 }
       clearHoverControls()
       return
     }
+    // Fade the entire caption feed, keeping its separate native action buttons legible.
+    panel.feedView.alphaValue = 0.65
     lastHoverPoint = pointer
     // Reflow can replace a hovered sentence. Wait for re-entry before arming its replacement.
     if closeButton?.captionID != caption.id, previousHoverPoint.map(bubble.contains) == true {
@@ -373,11 +412,14 @@ struct CaptionDisplay: Identifiable, Equatable {
       animateAlpha(to: 1, duration: preview ? 0.18 : 0)
       trackHover()
     }
+    updateDismissPanels(for: content, in: panel)
   }
 
   private func hide(immediately: Bool) {
     guard let panel, !rendered.items.isEmpty || (immediately && panel.isVisible) else { return }
     rendered = .init()
+    clearHoverControls()
+    clearDismissPanels()
     if immediately { presentation.update([], username: "", preview: false, animated: false) }
     hoverTask?.cancel()
     hoverTask = nil

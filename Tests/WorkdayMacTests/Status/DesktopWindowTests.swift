@@ -216,6 +216,123 @@ final class DesktopWindowTests: XCTestCase {
     XCTAssertEqual(feed.content.items.first?.id, first.id)
   }
 
+  @MainActor func testClickingBubbleDismissesOnlyThatSentenceAndKeepsItsHistory() async throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    let focus = BackgroundFocusProbe()
+    defer { focus.stop() }
+    let lines = try (0..<2).map {
+      try withVoice(LiveLine(id: "click-\($0)", segment: 0, sentence: $0,
+                            text: "第\($0 + 1)句字幕。", isFinal: true), in: model)
+    }
+    for line in lines { model.captionHistory.accept(line, evidenceID: line.voiceID) }
+    let history = model.captionHistory.records
+    model.desktop.refresh(transcript: lines, pointer: .zero)
+    let panel = try XCTUnwrap(model.desktop.panel)
+    let feed = panel.feedView.rootView.presentation
+    let surface = try dismissSurface(for: lines[0].id, in: panel)
+    let bubble = try XCTUnwrap(panel.anchor(for: lines[0].id))
+    XCTAssertEqual(surface.frame.minX, bubble.minX, accuracy: 1)
+    XCTAssertEqual(surface.frame.maxX, bubble.maxX, accuracy: 1)
+    XCTAssertEqual(surface.frame.minY, bubble.minY, accuracy: 1)
+    XCTAssertEqual(surface.frame.maxY, bubble.maxY, accuracy: 1)
+    XCTAssertFalse(surface.canBecomeKey)
+    let body = NSPoint(x: bubble.midX, y: bubble.minY + 10)
+    try await assertClickTarget(surface, at: body)
+    try click(surface, at: body)
+    XCTAssertEqual(feed.content.items.map(\.id), ["click-1"])
+    XCTAssertEqual(model.captionHistory.records, history)
+    XCTAssertFalse(surface.isVisible)
+    XCTAssertNil(surface.parent)
+
+    var revised = lines
+    revised[0].text = "关闭以后收到的修订。"
+    model.desktop.refresh(transcript: revised, pointer: .zero)
+    XCTAssertEqual(feed.content.items.map(\.id), ["click-1"])
+    let next = try dismissSurface(for: lines[1].id, in: panel)
+    let header = NSPoint(x: next.frame.minX + 8, y: next.frame.maxY - 10)
+    try click(next, at: header, count: 2)
+    XCTAssertEqual(feed.content.items.map(\.id), ["click-1"], "双击的第二下不能误关补位的字幕")
+    try click(next, at: header)
+    XCTAssertFalse(next.isVisible)
+    XCTAssertNil(next.parent)
+    XCTAssertEqual(model.captionHistory.records, history)
+    XCTAssertFalse(focus.activatedTestApplication)
+  }
+
+  @MainActor func testIdentityButtonsKeepWorkingWithoutDismissingTheBubble() throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    let line = try withVoice(LiveLine(id: "identity-click", segment: 0, sentence: 0,
+                                     text: "确认一下发言人。", isFinal: false), in: model)
+    model.desktop.refresh(transcript: [line], pointer: .zero)
+    let panel = try XCTUnwrap(model.desktop.panel)
+    let feed = panel.feedView.rootView.presentation
+    let surface = try dismissSurface(for: line.id, in: panel)
+    for title in ["是我", "不是我"] {
+      let caption = try XCTUnwrap(feed.content.items.first)
+      let anchor = try XCTUnwrap(panel.anchor(for: caption.actionAnchor))
+      let pointer = NSPoint(x: anchor.midX, y: anchor.midY)
+      model.desktop.refresh(pointer: .zero)
+      model.desktop.refresh(pointer: pointer)
+      let actions = try XCTUnwrap(model.desktop.voiceActions[line.id])
+      // Even before the hover button is armed, its reserved area must never close the sentence.
+      try click(surface, at: pointer)
+      XCTAssertEqual(feed.content.items.map(\.id), [line.id])
+      let button = try XCTUnwrap(actions.contentView?.subviews.first as? NSButton)
+      XCTAssertEqual(button.title, title)
+      button.performClick(nil)
+      XCTAssertEqual(feed.content.items.map(\.id), [line.id])
+      XCTAssertEqual(feed.content.items.first?.isMine, title == "是我")
+      XCTAssertTrue(feed.content.items.first?.markedHere == true)
+    }
+  }
+
+  @MainActor func testNativeIdentityControlStaysAboveTheBubbleClickSurface() async throws {
+    _ = NSApplication.shared
+    let presentation = CaptionFeedPresentation()
+    let caption = DesktopCaption(id: "native-click", text: "测试点击区域。", isFinal: true,
+                                 identityControls: .confirm)
+    presentation.update([caption], username: "发言人", preview: false, animated: false)
+    let panel = CaptionPanel(frame: CaptionPlacement.frame(in: try XCTUnwrap(NSScreen.main).visibleFrame),
+                             feed: CaptionFeedView(presentation: presentation))
+    let target = CaptionDismissPanel(captionID: caption.id)
+    let actions = CaptionVoiceActions(turn: caption.id, controls: .confirm, sentence: caption.text)
+    defer { actions.detach(); target.detach(); panel.close() }
+    panel.orderFrontRegardless()
+    let bubble = try XCTUnwrap(panel.anchor(for: caption.id))
+    let identity = try XCTUnwrap(panel.anchor(for: caption.actionAnchor))
+    target.show(in: panel, bubble: bubble, identityFrame: identity)
+    actions.show(in: panel, at: identity)
+    try await assertClickTarget(actions, at: NSPoint(x: identity.midX, y: identity.midY))
+    try await assertClickTarget(target, at: NSPoint(x: bubble.midX, y: bubble.minY + 10))
+    let gap = NSPoint(x: panel.frame.minX + 2, y: panel.frame.minY + 2)
+    let hit = NSWindow.windowNumber(at: gap, belowWindowWithWindowNumber: 0)
+    XCTAssertFalse([panel.windowNumber, target.windowNumber, actions.windowNumber].contains(hit))
+  }
+
+  @MainActor func testHidingBubblesImmediatelyRemovesTheirClickSurfaces() throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    model.desktop.preview()
+    let panel = try XCTUnwrap(model.desktop.panel)
+    let id = try XCTUnwrap(panel.feedView.rootView.presentation.content.items.first?.id)
+    let surface = try dismissSurface(for: id, in: panel)
+    model.desktop.snooze()
+    XCTAssertFalse(surface.isVisible)
+    XCTAssertNil(surface.parent)
+    XCTAssertTrue(panel.childWindows?.isEmpty != false, "淡出过程中不能留下透明的鼠标拦截区域")
+  }
+
   @MainActor func testPanelKeepsNewerRowsVisibleWhileOldestBubblesExit() async throws {
     _ = NSApplication.shared
     let model = isolatedModel()
@@ -425,6 +542,34 @@ final class DesktopWindowTests: XCTestCase {
     presentation.update(lines, username: "青木", preview: true, animated: false)
     XCTAssertEqual(presentation.content.username, "青木")
     XCTAssertTrue(presentation.content.preview)
+  }
+
+  @MainActor private func dismissSurface(for id: String, in panel: CaptionPanel) throws -> NSWindow {
+    try XCTUnwrap(panel.childWindows?.first {
+      $0.identifier?.rawValue == "workday.caption-dismiss.\(id)"
+    }, "每条已显示气泡都应有可直接点击的关闭区域")
+  }
+
+  @MainActor private func click(_ window: NSWindow, at point: NSPoint, count: Int = 1) throws {
+    for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+      let event = try XCTUnwrap(NSEvent.mouseEvent(
+        with: type, location: window.convertPoint(fromScreen: point), modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+        context: nil, eventNumber: 0, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0))
+      window.sendEvent(event)
+    }
+  }
+
+  @MainActor private func assertClickTarget(
+    _ window: NSWindow, at point: NSPoint, file: StaticString = #filePath, line: UInt = #line
+  ) async throws {
+    window.displayIfNeeded()
+    for _ in 0..<20 {
+      if NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) == window.windowNumber { return }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    XCTAssertEqual(NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0), window.windowNumber,
+                   "鼠标点击应由对应气泡或身份按钮接收", file: file, line: line)
   }
 
   @MainActor private func withVoice(_ line: LiveLine, in model: AppModel) throws -> LiveLine {

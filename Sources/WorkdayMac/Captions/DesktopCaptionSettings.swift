@@ -63,7 +63,7 @@ struct DesktopCaptionSettings: View {
         }.padding(16)
         Divider()
         HStack {
-          Text(desktop.isSnoozed ? "桌面语音气泡已暂时隐藏" : "将指针移到气泡上可校正身份。右键点标注按钮可选择另一项或撤销。")
+          Text(desktop.isSnoozed ? "桌面语音气泡已暂时隐藏" : "点击气泡可收起；移入后点「是我 / 不是我」可校正身份。右键点标注按钮可选择另一项或撤销。")
             .font(.system(size: 11)).foregroundStyle(Palette.muted)
           Spacer()
           if desktop.isSnoozed {
