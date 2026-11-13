@@ -8,7 +8,7 @@ mkdir -p "$WORKDAY_OUTPUT/validation"
 export WORKDAY_TEST_ROOT="$WORKDAY_OUTPUT/validation"
 if [[ "${1:-}" == "--full" ]]; then
   shift
-  WORKDAY_INPUT="${WORKDAY_FIXTURES:-$HOME/Documents/CodexArtifacts/WorkRecorder/2026-11-11-开发基线/fixtures}"
+  WORKDAY_INPUT="${WORKDAY_FIXTURES:-$HOME/Documents/CodexArtifacts/WorkRecorder/fixtures}"
   for fixture in apple/card.opusraw apple/edges.opusraw public-voices/fangjun-test-sr-1.wav workspace/Records workspace/Days; do
     if [[ ! -e "$WORKDAY_INPUT/$fixture" ]]; then
       echo "Missing acceptance fixture: $WORKDAY_INPUT/$fixture (see README.md)" >&2
@@ -17,7 +17,7 @@ if [[ "${1:-}" == "--full" ]]; then
   done
   export WORKDAY_APPLE_SPEECH="$WORKDAY_INPUT/apple/card.opusraw" WORKDAY_APPLE_SPEECH_EDGES="$WORKDAY_INPUT/apple/edges.opusraw"
   export WORKDAY_PUBLIC_SPEECH="$WORKDAY_INPUT/public-voices"
-  export WORKDAY_LONG_AUDIO=1 WORKDAY_DESKTOP_SNAPSHOTS=1 WORKDAY_WORKSPACE_SNAPSHOTS=1
+  export WORKDAY_LONG_AUDIO=1 WORKDAY_DESKTOP_SNAPSHOTS=1 WORKDAY_WORKSPACE_SNAPSHOTS=1 WORKDAY_STATUS_SNAPSHOTS=1
   WORKDAY_FIXTURE_LIBRARY="$(mktemp -d "$WORKDAY_TEST_ROOT/workspace-fixture.XXXXXX")"
   export WORKDAY_FIXTURE_LIBRARY
   trap '/bin/rm -rf "$WORKDAY_FIXTURE_LIBRARY"' EXIT

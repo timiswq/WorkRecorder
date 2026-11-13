@@ -1,0 +1,465 @@
+import AppKit
+import QS668Core
+import SwiftUI
+import WorkdayCore
+import XCTest
+
+@testable import WorkdayMac
+
+final class DesktopWindowTests: XCTestCase {
+  @MainActor func testFullScreenQueriesFollowCaptionVisibilityAndReuseRecentResults() throws {
+    _ = NSApplication.shared
+    guard NSScreen.screens.first != nil else { throw XCTSkip("需要显示器以验证字幕所在屏幕") }
+    let model = AppModel(libraryURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+    model.preferences.captions.enabled = true
+    model.localCaptions.configure(enabled: true, service: nil)
+    var checks = 0
+    let desktop = DesktopCompanion { _ in checks += 1; return true }
+    desktop.start(model: model)
+    defer { desktop.stop() }
+    let now = Date()
+    desktop.refresh(now: now)
+    XCTAssertEqual(checks, 0)
+
+    let line = try withVoice(LiveLine(id: "one", segment: 0, sentence: 0, text: "正在测试", isFinal: false), in: model)
+    for step in 0..<20 {
+      desktop.refresh(now: now.addingTimeInterval(Double(step) / 100), transcript: [line])
+    }
+    XCTAssertEqual(checks, 1)
+    XCTAssertNil(desktop.panel, "全屏期间收到的字幕应保持隐藏")
+    desktop.refresh(now: now.addingTimeInterval(0.6), transcript: [line])
+    XCTAssertEqual(checks, 2)
+    desktop.snooze()
+    desktop.refresh(now: now.addingTimeInterval(1.2), transcript: [line])
+    XCTAssertEqual(checks, 2)
+  }
+
+  @MainActor func testPanelCannotBecomeKeyOrInterceptMouse() {
+    _ = NSApplication.shared
+    let panel = CaptionPanel(frame: .zero, feed: CaptionFeedView(presentation: CaptionFeedPresentation()))
+    XCTAssertFalse(panel.canBecomeKey)
+    XCTAssertFalse(panel.canBecomeMain)
+    XCTAssertTrue(panel.ignoresMouseEvents)
+    XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
+    XCTAssertFalse(panel.hidesOnDeactivate)
+    panel.close()
+  }
+
+  func testPlacementStaysInSelectedSecondaryScreen() {
+    let screen = CGRect(x: -1920, y: 140, width: 1920, height: 1055)
+    let panel = CaptionPlacement.frame(in: screen)
+    XCTAssertTrue(screen.contains(panel))
+    XCTAssertEqual(panel.maxX, -16)
+    XCTAssertEqual(panel.maxY, screen.maxY - 6)
+    XCTAssertEqual(panel.width, 360)
+    XCTAssertEqual(panel.height, 352)
+  }
+
+  @MainActor func testDifferentWidthCaptionsShareTheScreenRightInset() throws {
+    _ = NSApplication.shared
+    let screen = try XCTUnwrap(NSScreen.main).visibleFrame
+    let feed = CaptionFeedPresentation()
+    feed.update([
+      DesktopCaption(id: "short", text: "收到", isFinal: true),
+      DesktopCaption(id: "long", text: "下午我们一起确认这段录音的效果。", isFinal: false),
+    ], username: "发言", preview: false, animated: false)
+    let panel = CaptionPanel(frame: CaptionPlacement.frame(in: screen), feed: CaptionFeedView(presentation: feed))
+    defer { panel.close() }
+
+    let short = try XCTUnwrap(panel.anchor(for: "short"))
+    let long = try XCTUnwrap(panel.anchor(for: "long"))
+    XCTAssertLessThan(short.width, long.width)
+    XCTAssertEqual(short.maxX, long.maxX, accuracy: 1)
+    XCTAssertEqual(screen.maxX - long.maxX, 22, accuracy: 1)
+  }
+
+  func testFullScreenDistinguishesMaximizedWorkArea() {
+    let display = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    XCTAssertTrue(CaptionPlacement.coversDisplay(window: display, display: display))
+    XCTAssertFalse(
+      CaptionPlacement.coversDisplay(
+        window: CGRect(x: 0, y: 25, width: 1440, height: 830), display: display))
+    XCTAssertFalse(
+      CaptionPlacement.coversDisplay(
+        window: CGRect(x: 1440, y: 0, width: 1440, height: 900), display: display))
+  }
+
+  @MainActor func testWideBodyGivesTheNameSpareRoomWithoutWideningShortCaptions() throws {
+    _ = NSApplication.shared
+    let feed = CaptionFeedPresentation()
+    let longName = "上海研发项目协调陈晨"
+    let wide = "今天核对会议时间，再确认周五要交付的文件。"
+    func row(_ id: String, _ name: String, _ text: String) -> DesktopCaption {
+      .init(id: id, text: text, isFinal: true, speakerLabel: name,
+            identityControls: .confirm, receivedAt: Date(timeIntervalSince1970: 0))
+    }
+    let rows = [row("long", longName, wide), row("one", "林", wide), row("short", longName, "好。")]
+    feed.update(rows, username: "", preview: false, animated: false)
+    let frame = CaptionPlacement.frame(in: try XCTUnwrap(NSScreen.main).visibleFrame)
+    let panel = CaptionPanel(frame: frame, feed: CaptionFeedView(presentation: feed))
+    defer { panel.close() }
+    func buttonOffset(_ row: DesktopCaption) throws -> CGFloat {
+      let bubble = try XCTUnwrap(panel.anchor(for: row.id))
+      let action = try XCTUnwrap(panel.anchor(for: row.actionAnchor))
+      XCTAssertTrue(bubble.contains(action))
+      return action.minX - bubble.minX
+    }
+    let font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+    let expected = ((longName as NSString).size(withAttributes: [.font: font]).width
+                    - ("林" as NSString).size(withAttributes: [.font: font]).width)
+    XCTAssertEqual(try buttonOffset(rows[0]) - buttonOffset(rows[1]), expected, accuracy: 2)
+    XCTAssertLessThan(try buttonOffset(rows[2]), try buttonOffset(rows[0]))
+  }
+
+  @MainActor func testReflowCannotArmAnotherSentenceUnderAStationaryPointer() throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    let first = LiveLine(id: "first", segment: 0, sentence: 0, text: "下午三点开会。", isFinal: true)
+    let second = LiveLine(id: "second", segment: 0, sentence: 1, text: "明天九点交稿。", isFinal: true)
+    let firstRow = try withVoice(first, in: model), secondRow = try withVoice(second, in: model)
+    model.desktop.refresh(transcript: [firstRow], pointer: .zero)
+    let panel = try XCTUnwrap(model.desktop.panel)
+    let host = panel.feedView
+    let firstCaption = try XCTUnwrap(host.rootView.presentation.content.items.first)
+    let button = try XCTUnwrap(panel.anchor(for: firstCaption.actionAnchor))
+    let pointer = NSPoint(x: button.midX, y: button.midY)
+    model.desktop.refresh(pointer: pointer)
+    XCTAssertNotNil(model.desktop.voiceActions[first.id])
+    model.desktop.refresh(transcript: [firstRow, secondRow], pointer: pointer)
+    let secondCaption = try XCTUnwrap(host.rootView.presentation.content.items.last)
+    XCTAssertTrue(try XCTUnwrap(panel.anchor(for: secondCaption.actionAnchor)).contains(pointer))
+    for _ in 0..<2 {
+      model.desktop.refresh(pointer: pointer)
+      XCTAssertTrue(model.desktop.voiceActions.isEmpty)
+      XCTAssertNil(model.desktop.closeButton)
+    }
+    model.desktop.refresh(pointer: NSPoint(x: pointer.x + 1, y: pointer.y))
+    XCTAssertTrue(model.desktop.voiceActions.isEmpty, "指针轻微抖动不能把标注转给新来的句子")
+    model.desktop.refresh(pointer: .zero)
+    model.desktop.refresh(pointer: pointer)
+    XCTAssertEqual(Set(model.desktop.voiceActions.keys), [second.id])
+  }
+
+  @MainActor func testPreviewReturnsOnlyLiveCaptionsWhoseDeadlineHasNotPassed() throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    let start = Date()
+    let end = start.addingTimeInterval(CaptionPreview.duration)
+    let old = (0..<2).map {
+      LiveLine(id: "old-\($0)", segment: 0, sentence: $0, text: "已经过期。", isFinal: true)
+    }
+    let recent = LiveLine(id: "recent", segment: 0, sentence: 2, text: "请带上合同。", isFinal: true)
+    let oldRows = try old.map { try withVoice($0, in: model) }
+    model.desktop.refresh(now: start, transcript: oldRows)
+    model.desktop.preview(now: start)
+    let host = try XCTUnwrap(model.desktop.panel?.feedView)
+    model.desktop.refresh(now: end.addingTimeInterval(-1), transcript: oldRows + [try withVoice(recent, in: model)])
+    XCTAssertTrue(host.rootView.presentation.content.preview)
+    XCTAssertFalse(host.rootView.presentation.content.items.contains { $0.id == recent.id })
+    model.desktop.refresh(now: end)
+    XCTAssertFalse(host.rootView.presentation.content.preview)
+    XCTAssertEqual(host.rootView.presentation.content.items.map(\.id), [recent.id])
+  }
+
+  @MainActor func testPreviewExpiresWithoutChangingFrontmostApplication() async throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.showInFullScreen = true
+    // Do not start model services: no hardware, credentials, or cloud activity in this test.
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    let focus = BackgroundFocusProbe()
+    defer { focus.stop() }
+    let keyWindow = NSApp.keyWindow
+    model.desktop.preview(now: Date().addingTimeInterval(0.3 - CaptionPreview.duration))
+    let panel = try XCTUnwrap(model.desktop.panel)
+    XCTAssertTrue(panel.isVisible)
+    XCTAssertFalse(panel.isKeyWindow)
+    XCTAssertFalse(focus.activatedTestApplication)
+    XCTAssertTrue(NSApp.keyWindow === keyWindow)
+    try await Task.sleep(for: .milliseconds(1_200))
+    XCTAssertFalse(panel.isVisible)
+    XCTAssertFalse(focus.activatedTestApplication)
+  }
+
+  @MainActor func testClosingLastPreviewBubblePersistsUntilANewPreview() async throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    let desktop = model.desktop
+    model.preferences.captions.showInFullScreen = true
+    desktop.start(model: model)
+    defer { desktop.stop() }
+    let start = Date()
+    desktop.preview(now: start)
+    let panel = try XCTUnwrap(desktop.panel)
+    let feed = panel.feedView.rootView.presentation
+    let first = try XCTUnwrap(feed.content.items.first)
+    let bubble = try XCTUnwrap(panel.anchor(for: first.id))
+    desktop.refresh(pointer: .zero)
+    desktop.refresh(pointer: NSPoint(x: bubble.midX, y: bubble.midY))
+    let close = try XCTUnwrap(desktop.closeButton)
+    XCTAssertTrue(desktop.voiceActions.isEmpty)
+    close.button.performClick(nil)
+    try await Task.sleep(for: .milliseconds(350))
+    XCTAssertFalse(panel.isVisible)
+    XCTAssertNil(desktop.closeButton)
+    desktop.refresh(now: start.addingTimeInterval(4))
+    XCTAssertFalse(feed.content.items.isEmpty)
+    XCTAssertFalse(feed.content.items.contains { $0.id == first.id })
+    desktop.preview()
+    XCTAssertEqual(feed.content.items.first?.id, first.id)
+  }
+
+  @MainActor func testPanelKeepsNewerRowsVisibleWhileOldestBubblesExit() async throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    let start = Date()
+    let lines = (0..<4).map { index in
+      LiveLine(id: "row-\(index)", segment: 0, sentence: index, text: "第\(index + 1)句", isFinal: true)
+    }
+    model.desktop.refresh(now: start, transcript: try lines.map { try withVoice($0, in: model) })
+    let panel = try XCTUnwrap(model.desktop.panel)
+    let host = panel.feedView
+    XCTAssertEqual(host.rootView.presentation.content.items.map(\.id), lines.map(\.id))
+    for removed in 1...3 {
+      model.desktop.refresh(now: start.addingTimeInterval(12 + Double(removed - 1) * 1.5))
+      XCTAssertEqual(host.rootView.presentation.content.items.map(\.id), lines.dropFirst(removed).map(\.id))
+      XCTAssertTrue(panel.isVisible)
+      XCTAssertEqual(panel.alphaValue, 1, accuracy: 0.01)
+    }
+    model.desktop.refresh(now: start.addingTimeInterval(16.5))
+    try await Task.sleep(for: .milliseconds(400))
+    XCTAssertFalse(panel.isVisible)
+  }
+
+  @MainActor func testLiveCaptionPanelKeepsItsFrameDuringAnimatedExpiryAndDraftUpdates() async throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    let start = Date()
+    var lines = (0..<4).map { index in
+      LiveLine(id: "live-\(index)", segment: 0, sentence: index,
+               text: "先核对会议时间。", isFinal: index < 3, receivedAt: start)
+    }
+    lines = try lines.map { try withVoice($0, in: model) }
+    model.desktop.refresh(now: start, transcript: [lines[0]], pointer: .zero)
+    let panel = try XCTUnwrap(model.desktop.panel)
+    try await Task.sleep(for: .milliseconds(50))
+    let frame = panel.frame
+    let resize = XCTNSNotificationExpectation(name: NSWindow.didResizeNotification, object: panel)
+    resize.isInverted = true
+    model.desktop.refresh(now: start.addingTimeInterval(5), transcript: lines, pointer: .zero)
+    try await Task.sleep(for: .milliseconds(50))
+    XCTAssertTrue(frame.contains(try XCTUnwrap(panel.anchor(for: lines[0].id))))
+    XCTAssertEqual(panel.contentMinSize, .zero)
+
+    let expiry = start.addingTimeInterval(12)
+    model.desktop.refresh(now: expiry, pointer: .zero)
+    for text in ["下午", "下午三点开会，", "下午三点开会，请带上本周的记录。"] {
+      lines[3].text = text
+      model.desktop.refresh(now: expiry, transcript: lines, pointer: .zero)
+      try await Task.sleep(for: .milliseconds(40))
+      XCTAssertEqual(panel.frame, frame)
+    }
+    await fulfillment(of: [resize], timeout: 0.25)
+    XCTAssertEqual(panel.frame, frame)
+    XCTAssertTrue(frame.contains(try XCTUnwrap(panel.anchor(for: lines[3].id))))
+  }
+
+  @MainActor func testUSBMenuFollowsTheMountedCardAndRequiredAction() throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.autoSync = false
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    let volume = USBVolume(id: "usb:b", url: model.libraryURL, name: "录音卡 B")
+    model.usb.volumes = [volume]
+    model.catalog.snapshots[volume.id] = DeviceInventory(sourceID: volume.id, entries: [
+      InventoryEntry(name: "note.wav", duration: 10, bytes: 100)
+    ], observedAt: Date(), complete: true)
+    XCTAssertEqual(model.cardSync.action, .start)
+    let manual = try menuSnapshot(model)
+    model.preferences.boundID = "a"
+    model.preferences.boundName = "另一张蓝牙卡 A"
+    XCTAssertEqual(try menuSnapshot(model), manual, "蓝牙绑定不能改变 USB 来源")
+    model.usb.volumes = [USBVolume(id: volume.id, url: volume.url, name: "已改名的磁盘")]
+    XCTAssertNotEqual(try menuSnapshot(model), manual, "面板应显示实际卷名")
+    model.usb.volumes = [volume]
+    model.usb.activeFilenameUnknown = true
+    XCTAssertEqual(model.cardSync.action, .confirm)
+    XCTAssertNotEqual(try menuSnapshot(model), manual, "需在卡上保存和待手动同步应有不同的提示")
+  }
+
+  @MainActor func testMenuStillRendersTheSentenceWhenPausedOrTranscriptionFails() throws {
+    _ = NSApplication.shared
+    let stream = TestLiveStream()
+    let now = Date()
+    let live = LivePreview(clock: { now }, makeStream: { _ in stream })
+    let model = isolatedModel(localCaptions: live)
+    model.card.state.connected = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop(); live.reset() }
+    live.configure(enabled: true, service: AIService(key: "test-only"))
+    var parser = FrameParser()
+    func sample(_ text: String) throws -> (paused: Data, failed: Data) {
+      let previous = model.menuRecentSpeech?.line.id
+      model.card.onStreamReset?(.started)
+      XCTAssertEqual(model.menuRecentSpeech?.line.id, previous)
+      live.append(Data(repeating: 0, count: 40))
+      stream.onEvent?(.sentence(id: 0, text: text, isFinal: true))
+      model.card.state.apply(try XCTUnwrap(parser.push(Wire.frame([3, 20, 3], seq: 0)).first))
+      model.card.onStreamReset?(.paused)
+      let paused = try menuSnapshot(model)
+      model.card.state.apply(try XCTUnwrap(parser.push(Wire.frame([3, 20, 1], seq: 0)).first))
+      model.card.onStreamReset?(.resumed)
+      stream.onEvent?(.failed(code: "network", message: "测试连接中断"))
+      XCTAssertTrue(live.canRetry)
+      return (paused, try menuSnapshot(model))
+    }
+    let first = try sample("周四确认。")
+    let second = try sample("下周再看样稿。")
+    XCTAssertNotEqual(first.paused, second.paused, "暂停时面板仍应区分两句不同的原话")
+    XCTAssertNotEqual(first.failed, second.failed, "同一时间与错误下，面板仍应显示原句")
+  }
+
+  @MainActor func testNativeMenuAndCaptionSnapshots() throws {
+    guard ProcessInfo.processInfo.environment["WORKDAY_DESKTOP_SNAPSHOTS"] == "1" else { return }
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.username = "青木"
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    for scheme in [ColorScheme.light, .dark] {
+      let name = scheme == .dark ? "dark" : "light"
+      let menu = NSHostingView(
+        rootView: MenuBarPanel(model: model, desktop: model.desktop)
+          .environment(\.colorScheme, scheme))
+      menu.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+      menu.setFrameSize(NSSize(width: 320, height: menu.fittingSize.height))
+      try save(menu, named: "menu-\(name)")
+      let settings = NSHostingView(
+        rootView: DesktopCaptionSettings(model: model, desktop: model.desktop)
+          .padding(20).background(Palette.background).environment(\.colorScheme, scheme))
+      settings.appearance = menu.appearance
+      settings.setFrameSize(NSSize(width: 720, height: settings.fittingSize.height))
+      try save(settings, named: "caption-settings-\(name)")
+      let presentation = CaptionFeedPresentation()
+      presentation.update(
+        CaptionPreview.items(at: 7), username: "青木", preview: false, animated: false)
+      let caption = NSHostingView(
+        rootView: CaptionFeedView(presentation: presentation)
+          .background(Palette.background)
+          .environment(\.colorScheme, scheme))
+      caption.appearance = menu.appearance
+      caption.setFrameSize(NSSize(width: 360, height: 248))
+      try save(caption, named: "caption-\(name)")
+      presentation.update(
+        CaptionPreview.items(at: 0), username: "青木", preview: false, animated: false)
+      try save(caption, named: "caption-single-\(name)")
+      presentation.update(
+        (0..<4).map {
+          DesktopCaption(
+            id: "long:\($0)",
+            text: String(repeating: "先确认计划，", count: 9) + "最后检查这版的录音效果。",
+            isFinal: true)
+        }, username: "这是一个非常长的用户名用于确认布局", preview: false, animated: false)
+      try save(caption, named: "caption-long-\(name)")
+    }
+  }
+
+  @MainActor func testNewCaptionDuringFadeOutStaysVisible() async throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    model.desktop.preview()
+    try await Task.sleep(for: .milliseconds(220))
+    model.desktop.snooze()
+    model.desktop.preview()
+    // Frequent partial-result refreshes must not restart the fade-in each time.
+    for _ in 0..<10 {
+      model.desktop.refresh()
+      try await Task.sleep(for: .milliseconds(30))
+    }
+    let panel = try XCTUnwrap(model.desktop.panel)
+    XCTAssertTrue(panel.isVisible)
+    XCTAssertEqual(panel.alphaValue, 1, accuracy: 0.01)
+    XCTAssertFalse(panel.isKeyWindow)
+  }
+
+  @MainActor func testPreviewUpdatesKeepTheSameHostingView() throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    let start = Date()
+    model.desktop.preview(now: start)
+    let panel = try XCTUnwrap(model.desktop.panel)
+    let host = panel.feedView
+    for elapsed in [2.0, 4.0, 7.0, 13.0] {
+      model.desktop.refresh(now: start.addingTimeInterval(elapsed))
+      XCTAssertTrue(model.desktop.panel?.feedView === host)
+    }
+  }
+
+  @MainActor func testChangingUsernameUpdatesExistingBubbles() {
+    let presentation = CaptionFeedPresentation()
+    let lines = CaptionPreview.items(at: 7)
+    presentation.update(lines, username: "系统用户", preview: false, animated: false)
+    presentation.update(lines, username: "青木", preview: false, animated: false)
+    XCTAssertEqual(presentation.content.username, "青木")
+    XCTAssertEqual(presentation.content.items, lines)
+    presentation.update(lines, username: "青木", preview: true, animated: false)
+    XCTAssertEqual(presentation.content.username, "青木")
+    XCTAssertTrue(presentation.content.preview)
+  }
+
+  @MainActor private func withVoice(_ line: LiveLine, in model: AppModel) throws -> LiveLine {
+    var line = line
+    let database = try VoiceLibrary(root: model.store.root)
+    let evidence = "live:" + line.id
+    try database.record(id: evidence, source: "fixture", live: true, seconds: 3, voice: [1, 0])
+    if line.isFinal { line.voiceID = evidence }
+    else { line.draftVoice = .init(id: evidence, range: 0..<6000, packets: Data(repeating: 0, count: 6000)) }
+    return line
+  }
+
+  @MainActor private func isolatedModel(localCaptions: LivePreview? = nil) -> AppModel {
+    let root = ProcessInfo.processInfo.environment["WORKDAY_TEST_ROOT"] ?? NSTemporaryDirectory()
+    return AppModel(
+      libraryURL: URL(fileURLWithPath: root).appendingPathComponent("desktop-no-services").appendingPathComponent(UUID().uuidString),
+      localCaptions: localCaptions)
+  }
+
+  @MainActor private func save(_ view: NSView, named name: String) throws {
+    let root = try XCTUnwrap(ProcessInfo.processInfo.environment["WORKDAY_TEST_ROOT"])
+    try png(view).write(to: URL(fileURLWithPath: root).appendingPathComponent("\(name).png"))
+  }
+
+  @MainActor private func menuSnapshot(_ model: AppModel) throws -> Data {
+    model.desktop.refresh()
+    let host = NSHostingView(rootView: MenuBarPanel(model: model, desktop: model.desktop))
+    host.setFrameSize(NSSize(width: 320, height: host.fittingSize.height))
+    return try png(host)
+  }
+
+  @MainActor private func png(_ view: NSView) throws -> Data {
+    view.layoutSubtreeIfNeeded()
+    let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+    view.cacheDisplay(in: view.bounds, to: bitmap)
+    return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+  }
+}

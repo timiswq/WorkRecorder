@@ -8,10 +8,13 @@ public enum ProtocolError: LocalizedError {
 /// QS668 控制帧与字段编码；这里只处理字节，不访问蓝牙或磁盘。
 /// CRC/长度是小端，录音列表的计数与条目数值是大端，不可统一交换字节序。
 public enum Wire {
-    /// The recorder has no timezone field. Use the same Beijing time convention as its filenames.
-    public static func timeSyncPayload(_ date: Date) throws -> [UInt8] {
+    static let headerLength = 6
+    static let maximumPayloadLength = 8192
+
+    /// 校时帧只传年月日时分秒。App 显式传入本地时区，旧调用仍默认北京时间。
+    public static func timeSyncPayload(_ date: Date, timeZone: TimeZone = TimeZone(identifier: "Asia/Shanghai")!) throws -> [UInt8] {
         var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        calendar.timeZone = timeZone
         let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
         guard let year = parts.year, (1...65535).contains(year),
               let month = parts.month, let day = parts.day, let hour = parts.hour,
@@ -31,18 +34,28 @@ public enum Wire {
     }
     /// 0x5A | seq | CRC_LE16 | payloadLength_LE16 | TYPE | CMD | body。
     public static func frame(_ payload: [UInt8], seq: UInt8) -> Data {
-        precondition(payload.count <= 8192)
+        precondition(payload.count <= maximumPayloadLength)
         let length = [UInt8(payload.count & 255), UInt8(payload.count >> 8)]
         let checksum = crc(length + payload)
         return Data([0x5a, seq, UInt8(checksum & 255), UInt8(checksum >> 8)] + length + payload)
     }
-    /// 保留的 BLE 文件下载请求编码参考；当前 App 的文件同步走 USB，未接入此请求。
-    public static func importPayload(_ name: String) throws -> [UInt8] {
+    /// Demo 2-2：偏移 LE32 + 固定 24 字节文件名，一次写完 36 字节。
+    public static func importPayload(_ name: String, offset: UInt32 = 0) throws -> [UInt8] {
         let bytes = Array(name.utf8)
         guard !bytes.isEmpty, bytes.count <= 24, !bytes.contains(0), !name.contains("/"), !name.contains("\\") else {
             throw ProtocolError.invalid("设备文件名无效或超过 24 字节")
         }
-        return [2, 2, 0, 0, 0, 0] + bytes + Array(repeating: 0, count: 24 - bytes.count)
+        return [2, 2] + le32Bytes(offset) + bytes + Array(repeating: 0, count: 24 - bytes.count)
+    }
+    static func le32Bytes(_ value: UInt32) -> [UInt8] {
+        (0..<4).map { UInt8(truncatingIfNeeded: value >> ($0 * 8)) }
+    }
+    public static func segmentPayload(_ name: String, start: UInt32, end: UInt32) throws -> [UInt8] {
+        let bytes = Array(name.utf8)
+        // 类型、命令和两个 LE32 偏移共占 10 字节。
+        guard !bytes.isEmpty, bytes.count <= maximumPayloadLength - 10, !bytes.contains(0), !name.contains("/"), !name.contains("\\"),
+              end >= start else { throw ProtocolError.invalid("分段文件名或偏移无效") }
+        return [2, 12] + le32Bytes(start) + le32Bytes(end) + bytes
     }
     public static func text(_ bytes: some Sequence<UInt8>) -> String {
         String(decoding: Array(bytes.prefix { $0 != 0 }), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -64,7 +77,7 @@ public struct Frame: Equatable {
 }
 
 /// 每个通知特征独立持有一个解析器；一次通知可以只含半帧，也可含多帧。
-/// CRC 失败后搜索下一个帧头，corruptionCount 交给上层标记音频完整性。
+/// 长度越界时重新找帧头。长度合法时先消费整帧，再校验非零 CRC，避免把坏帧内的 0x5A 当成新帧头。
 public struct FrameParser {
     private var buffer: [UInt8] = []
     public private(set) var corruptionCount = 0
@@ -72,20 +85,21 @@ public struct FrameParser {
     public mutating func push(_ data: Data) -> [Frame] {
         buffer.append(contentsOf: data)
         var frames: [Frame] = []
-        while buffer.count >= 6 {
+        while buffer.count >= Wire.headerLength {
             guard let start = buffer.firstIndex(of: 0x5a) else { buffer.removeAll(); break }
             if start > 0 { buffer.removeFirst(start) }
-            guard buffer.count >= 6 else { break }
+            guard buffer.count >= Wire.headerLength else { break }
             let length = Int(buffer[4]) | Int(buffer[5]) << 8
-            guard (1...8192).contains(length) else { buffer.removeFirst(); corruptionCount += 1; continue }
-            guard buffer.count >= length + 6 else { break }
+            guard length <= Wire.maximumPayloadLength else { buffer.removeFirst(); corruptionCount += 1; continue }
+            let frameLength = Wire.headerLength + length
+            guard buffer.count >= frameLength else { break }
             let expected = UInt16(buffer[2]) | UInt16(buffer[3]) << 8
-            guard Wire.crc(buffer[4..<(length + 6)]) == expected else {
-                // This QS668 build uses strict CRC. Zero-CRC watch compatibility is intentionally not assumed.
-                buffer.removeFirst(); corruptionCount += 1; continue
+            let packet = Array(buffer.prefix(frameLength))
+            buffer.removeFirst(frameLength)
+            guard expected == 0 || Wire.crc(packet.dropFirst(4)) == expected else {
+                corruptionCount += 1; continue
             }
-            frames.append(Frame(sequence: buffer[1], payload: Array(buffer[6..<(length + 6)])))
-            buffer.removeFirst(length + 6)
+            frames.append(Frame(sequence: packet[1], payload: Array(packet.dropFirst(Wire.headerLength))))
         }
         return frames
     }
@@ -105,6 +119,8 @@ public struct DeviceStorage: Equatable {
 }
 
 public struct DeviceRecording: Identifiable, Codable, Equatable {
+    // 时长和大小各 4 字节，文件名 20 字节。删除单条时需回送整条原始记录。
+    static let entryLength = 28
     public let duration: UInt32
     public let size: UInt32
     public let name: String
@@ -131,10 +147,10 @@ public struct DeviceRecording: Identifiable, Codable, Equatable {
     public static func parse(_ body: [UInt8]) throws -> [DeviceRecording] {
         guard body.count >= 4 else { throw ProtocolError.invalid("录音列表缺少条目数量") }
         let count = Int(Wire.be32(body[0..<4]))
-        guard count <= 8192 / 28, body.count == 4 + count * 28 else { throw ProtocolError.invalid("录音列表长度与条目数量不符") }
+        guard count <= Wire.maximumPayloadLength / entryLength, body.count == 4 + count * entryLength else { throw ProtocolError.invalid("录音列表长度与条目数量不符") }
         return try (0..<count).map { index in
-            let start = 4 + index * 28
-            let name = Wire.text(body[(start + 8)..<(start + 28)])
+            let start = 4 + index * entryLength
+            let name = Wire.text(body[(start + 8)..<(start + entryLength)])
             guard !name.isEmpty, !name.contains("/"), !name.contains("\\"), name != ".", name != ".." else {
                 throw ProtocolError.invalid("设备返回不安全的文件名")
             }

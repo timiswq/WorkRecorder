@@ -5,6 +5,7 @@ let package = Package(
   name: "Workday",
   platforms: [.macOS(.v14)],
   products: [
+    .library(name: "QS668Core", targets: ["QS668Core"]),
     .library(name: "WorkdayMac", targets: ["WorkdayMac"]),
     .executable(name: "Workday", targets: ["WorkdayLauncher"]),
   ],
@@ -27,7 +28,7 @@ let package = Package(
         "QS668Core",
         "SherpaOnnxMacOS", "OnnxruntimeMacOS",
       ],
-      resources: [.copy("Resources/campplus.onnx")],
+      resources: [.copy("Resources/campplus.onnx"), .copy("Resources/silero_vad.onnx")],
       linkerSettings: [
         .linkedLibrary("c++"), .linkedFramework("CoreML"), .linkedFramework("Accelerate"),
       ]),

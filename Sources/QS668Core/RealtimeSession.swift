@@ -6,11 +6,13 @@ public enum RealtimePhase: String, Codable {
     public var isActive: Bool { acceptsAudio || self == .finalizing }
 }
 
-/// The phase follows received device events; sending a command is not an acknowledgement.
+/// 发出命令后进入等待阶段，收到设备回报才确认录音、暂停或保存。
 public struct RealtimeSession {
     /// App 发起使用 TYPE 1；接入机身录音使用 TYPE 3 控制，不能混用开始命令。
     public enum ControlMode: String, Codable { case realtime, device }
     public private(set) var controlMode: ControlMode = .realtime
+    /// 普通录音需要请求机身保存，App 发起的实时录音通过结束实时流停止。
+    public var stopCommand: RecorderCommand { controlMode == .device ? .recording(.save) : .realtimeStop }
     public private(set) var phase: RealtimePhase = .idle
     public private(set) var receivedBytes = 0
     public private(set) var deviceFilename: String?
@@ -22,24 +24,29 @@ public struct RealtimeSession {
     public mutating func start() throws -> [UInt8] {
         guard !phase.isActive else { throw ProtocolError.invalid("上一条实时录音尚未结束") }
         self = RealtimeSession(); phase = .starting
-        return [1, 0]
+        return try RecorderCommand.realtimeStart.payload()
     }
-    /// Adopt an existing device recording without sending another start-recording command.
+    /// 接入机身已有录音时，只建立本地接收状态。
     public mutating func adoptDeviceRecording(paused: Bool) throws {
         guard !phase.isActive else { throw ProtocolError.invalid("上一条实时录音尚未结束") }
         self = RealtimeSession(); controlMode = .device; phase = paused ? .paused : .recording
     }
     public mutating func pause() throws -> [UInt8] {
         guard phase == .recording else { throw ProtocolError.invalid("当前不能暂停") }
-        phase = .pausing; return controlMode == .device ? [3, 5] : [1, 3, 1]
+        phase = .pausing
+        let command: RecorderCommand = controlMode == .device ? .recording(.pause) : .realtimePause
+        return try command.payload()
     }
     public mutating func resume() throws -> [UInt8] {
         guard phase == .paused else { throw ProtocolError.invalid("当前不能继续") }
-        phase = .resuming; return controlMode == .device ? [3, 7] : [1, 3, 0]
+        phase = .resuming
+        let command: RecorderCommand = controlMode == .device ? .recording(.resume) : .realtimeResume
+        return try command.payload()
     }
     public mutating func stop() throws -> [UInt8] {
         guard phase.acceptsAudio else { throw ProtocolError.invalid("当前没有待结束的录音") }
-        phase = .stopping; return controlMode == .device ? [3, 3] : [1, 2]
+        phase = .stopping
+        return try stopCommand.payload()
     }
     public mutating func filename(_ name: String) { if phase.acceptsAudio { deviceFilename = name } }
     @discardableResult public mutating func append(byteCount: Int) -> Bool {

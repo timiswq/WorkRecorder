@@ -1,9 +1,14 @@
 # 工作留声
 
-本仓库是工作留声 App 的开发目录。后续源码修改、构建、测试和打包均从本仓库进行。
+本仓库是工作留声 App 的正式开发目录。源码修改、构建、测试和打包从这里执行。
 
-- Xcode 入口是 `WorkRecorder.xcodeproj`，App scheme 是 `WorkRecorder`。命令行使用 `./script/build_and_run.sh --build-only` 和 `./script/test.sh`。
-- 业务代码位于 `Sources/WorkdayMac` 和 `Sources/WorkdayCore`，本项目使用的协议库位于 `Sources/QS668Core`。
-- 原型、截图、日志和构建验证产物放在仓库外的 `~/Documents/CodexArtifacts/WorkRecorder/`。
-
-当前正式开发基点为本仓库的 `baseline-2026-11-11`（0.5.3 / 20260004）。日常改动从 `main` 继续，完整验收使用 `./script/test.sh --full`。README.md 维护当前使用方式、源码入口和构建步骤。
+- 默认直接在当前仓库开发，不使用 worktree 或 subagent；已有未提交改动须保留。
+- 当前基线为 `baseline-2026-11-13`（0.6.0 / 20260005），后续从 `main` 继续。旧基线仅作历史追溯。
+- Xcode 入口为 `WorkRecorder.xcodeproj`，scheme 为 `WorkRecorder`；工程配置文件为 `project.xcproj`。
+- 启动入口在 `WorkRecorder/`；界面与协调在 `Sources/WorkdayMac/`，业务处理在 `Sources/WorkdayCore/`，二者按职责分目录；协议在 `Sources/QS668Core/`。
+- 构建：`./script/build_and_run.sh --build-only`。测试：`./script/test.sh`；完整验收：`./script/test.sh --full`。
+- 原型、截图、日志、下载、模型转换缓存与构建验证产物必须放在仓库外 `~/Documents/CodexArtifacts/WorkRecorder/`；设置 `WORKDAY_ARTIFACTS` 可覆盖输出目录。
+- 完整验收样本默认为同级 `fixtures/`；设置 `WORKDAY_FIXTURES` 可覆盖。测试使用隔离资料库、后台窗口，不抢占前台焦点。
+- 清理前确认文件归属与运行依赖；保留发布物、有效证据、必要样本、用户资料库与钥匙串。
+- 当前使用方式见 README.md 和 `docs/使用指南.md`；目录、开发经验、验证方法见 `docs/开发指南.md`；能力与验收边界见 `docs/项目基线.md`。
+- 以当前源码和正式文档为准，客观区分自动化验证、历史实验和真实硬件验收。
