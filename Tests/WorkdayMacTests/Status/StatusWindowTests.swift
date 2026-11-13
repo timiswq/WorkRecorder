@@ -50,6 +50,17 @@ final class StatusWindowTests: XCTestCase {
     model.card.state.apply(parser.push(Wire.frame([3, 22, 200, 0, 0, 0, 0, 0], seq: 2))[0])
     model.card.state.apply(parser.push(Wire.frame([0, 4, 62], seq: 3))[0])
     try await capture(RootView(model: model), name: "status-recording-battery-wide", size: .init(width: 1100, height: 650))
+    if let path = ProcessInfo.processInfo.environment["WORKDAY_APPLE_SPEECH"] {
+      model.preferences.captions.enabled = false
+      let packets = Data(try Data(contentsOf: URL(fileURLWithPath: path)).prefix(12_000))
+      for start in stride(from: 0, to: packets.count, by: 200) {
+        model.card.onAudio?(Data(packets[start..<min(start + 200, packets.count)]))
+        try await Task.sleep(for: .milliseconds(10))
+        if (model.audioMeter.sample?.segments ?? 0) > 0 { break }
+      }
+      XCTAssertGreaterThan(model.audioMeter.sample?.segments ?? 0, 0)
+      try await capture(RootView(model: model), name: "sidebar-live-real-level", size: .init(width: 1100, height: 650))
+    }
     model.error = "示例任务失败，已有原件仍可查看。"
     try await capture(RootView(model: model), name: "status-recording-narrow", size: .init(width: 690, height: 510))
     model.card.receive(parser.push(Wire.frame([3, 1], seq: 4))[0], channel: "AE22")
@@ -81,6 +92,17 @@ final class StatusWindowTests: XCTestCase {
     }
     scan()
     try await capture(RootView(model: model), name: "status-usb-manual", size: .init(width: 900, height: 760))
+    model.showOriginals()
+    try await capture(RootView(model: model), name: "sidebar-originals-pending", size: .init(width: 1100, height: 760))
+    model.usb.volumes = []
+    model.catalog.snapshots[volume.id]?.observedAt = Date().addingTimeInterval(-3600)
+    XCTAssertEqual(model.pendingSyncBadge, 1)
+    try await capture(RootView(model: model), name: "sidebar-originals-cached-pending", size: .init(width: 1100, height: 760))
+    model.usb.volumes = [volume]
+    scan()
+    model.preferences.theme = "dark"
+    try await capture(RootView(model: model), name: "sidebar-originals-pending-dark", size: .init(width: 1100, height: 760), dark: true)
+    model.preferences.theme = "light"
     model.usb.activeFilenameUnknown = true
     try await capture(MenuBarPanel(model: model, desktop: model.desktop), name: "status-menu-save-confirmation", size: .init(width: 340, height: 650))
     model.usb.activeFilenameUnknown = false
@@ -95,6 +117,18 @@ final class StatusWindowTests: XCTestCase {
     XCTAssertTrue(USBMonitor.files(volume).files.isEmpty)
     try await capture(RootView(model: model), name: "status-usb-saved", size: .init(width: 1100, height: 760))
     try await capture(MenuBarPanel(model: model, desktop: model.desktop), name: "status-menu-usb-saved", size: .init(width: 340, height: 650))
+    let day = "2026-11-13"
+    let summary = DaySummary(day: day, overview: "当天事项与总结已更新，可以开始查看。", recordingIDs: model.recordings.map(\.id))
+    model.summaries[day] = summary
+    model.recordDayUpdate(summary)
+    model.selectDay(day)
+    try await capture(RootView(model: model), name: "sidebar-day-updated", size: .init(width: 1100, height: 760))
+    XCTAssertTrue(model.dayUpdates.isUnseen(day), "后台截图不可代替用户阅读")
+    try await capture(RootView(model: model), name: "sidebar-day-updated-collapsed", size: .init(width: 690, height: 510))
+    model.markDayViewed(day, signature: try XCTUnwrap(model.dayUpdates.signature(for: day)))
+    model.processingID = model.recordings.first?.id
+    try await capture(RootView(model: model), name: "sidebar-day-processing", size: .init(width: 1100, height: 760))
+    model.processingID = nil
     await model.shutdown()
   }
 }

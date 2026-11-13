@@ -97,6 +97,8 @@ struct RecordingLibraryView: View {
   private func recordingList(_ recordings: [Recording]) -> some View {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: 10) {
+        if model.originalsDay == nil { PendingOriginalsView(model: model) }
+        Text("已保存到 Mac · \(recordings.count) 份").font(.headline).padding(.bottom, 4)
         if recordings.isEmpty {
           Text(model.originalsDay == nil ? "Mac 上还没有录音" : "这一天没有本地原件")
             .foregroundStyle(Palette.muted)

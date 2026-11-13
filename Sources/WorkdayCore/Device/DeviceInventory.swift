@@ -50,9 +50,26 @@ public struct DeviceInventory: Codable, Equatable, Sendable {
     recordings: [Recording], linkedSources: Set<String>, activeName: String?, today: String
   ) -> InventoryCount {
     var result = InventoryCount()
+    for entry in pendingEntries(recordings: recordings, linkedSources: linkedSources, activeName: activeName) {
+      let sameNames = recordings.filter { InventoryEntry.stem($0.originalName) == entry.stem }
+      if !sameNames.isEmpty { result.unverified += 1 }
+      if entry.isOpusOnly { result.unsupported += 1 }
+      let day = entry.day
+      if day == today {
+        result.today += 1
+      } else if day == "日期未知" {
+        result.unknownDate += 1
+      } else {
+        result.earlier += 1
+      }
+    }
+    return result
+  }
+
+  public func pendingEntries(recordings: [Recording], linkedSources: Set<String>, activeName: String?) -> [InventoryEntry] {
     let sources = linkedSources.union([sourceID])
-    let groups = Dictionary(grouping: entries, by: \.stem)
-    for (stem, files) in groups where activeName.map(InventoryEntry.stem) != stem {
+    return Dictionary(grouping: entries, by: \.stem).compactMap { stem, files in
+      guard activeName.map(InventoryEntry.stem) != stem else { return nil }
       let sameNames = recordings.filter { InventoryEntry.stem($0.originalName) == stem }
       let confirmed = sameNames.contains { record in
         guard !sources.isDisjoint(with: Set([record.sourceID] + (record.sourceAliases ?? [])))
@@ -64,19 +81,9 @@ public struct DeviceInventory: Codable, Equatable, Sendable {
             && entry.duration.map { abs($0 - record.duration) <= 2 } != false
         }
       }
-      if confirmed { continue }
-      if !sameNames.isEmpty { result.unverified += 1 }
-      if files.allSatisfy(\.isOpusOnly) { result.unsupported += 1 }
-      let day = files[0].day
-      if day == today {
-        result.today += 1
-      } else if day == "日期未知" {
-        result.unknownDate += 1
-      } else {
-        result.earlier += 1
-      }
-    }
-    return result
+      guard !confirmed else { return nil }
+      return files.first(where: { $0.name.lowercased().hasSuffix(".wav") }) ?? files.first
+    }.sorted { $0.name < $1.name }
   }
 }
 

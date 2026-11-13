@@ -4,8 +4,13 @@ import WorkdayCore
 struct DaySummaryView: View {
   @ObservedObject var model: AppModel
   @State private var expanded = false
+  @State private var recentlyUpdated = false
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
+      if recentlyUpdated || model.selectedDay.map({ model.dayUpdates.isUnseen($0) }) == true {
+        Label("事项与全天总结已更新", systemImage: "circle.fill")
+          .font(.system(size: 11)).foregroundStyle(Palette.accent)
+      }
       HStack {
         Text("全天总结").font(.system(size: 14, weight: .semibold))
         Spacer()
@@ -64,10 +69,23 @@ struct DaySummaryView: View {
             .help("用这一天已整理的录音重新生成摘要")
         }
       }
+    }.background {
+      if let day = model.selectedDay, model.dayUpdates.isUnseen(day),
+        let signature = model.dayUpdates.signature(for: day) {
+        DayResultReadMarker(signature: day + ":" + signature) {
+          model.markDayViewed(day, signature: signature)
+          recentlyUpdated = true
+          Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            recentlyUpdated = false
+          }
+        }
+      }
     }.padding(.bottom, 16)
       .overlay(alignment: .bottom) { Divider().allowsHitTesting(false) }
       .onChange(of: model.selectedDay) { _, _ in
         expanded = false
+        recentlyUpdated = false
       }
   }
 

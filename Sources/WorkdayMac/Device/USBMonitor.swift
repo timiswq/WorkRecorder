@@ -20,8 +20,8 @@ struct USBScan {
   @Published var issue: String?
   var onScan: ((USBScan) -> Void)?
   var onConnection: ((Bool) -> Void)?
-  var excludedStems = Set<String>()
-  var activeFilenameUnknown = false
+  @Published var excludedStems = Set<String>()
+  @Published var activeFilenameUnknown = false
   var needsSaveConfirmation: Bool { activeFilenameUnknown || !excludedStems.isEmpty }
   private var scanning = false
   private var timer: Timer?

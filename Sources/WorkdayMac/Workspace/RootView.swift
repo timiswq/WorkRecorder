@@ -94,16 +94,18 @@ struct RootView: View {
         if area == .device { Divider().padding(.vertical, 8) }
         Button {
           switch area {
+          case .day: model.showDayUpdates()
           case .originals: model.showOriginals()
           case .live: model.showLiveCaptions()
-          default: model.area = area
+          case .device: model.area = area
           }
         } label: {
-          navigationLabel(area.rawValue, icon: area.icon, expanded: expanded)
+          sidebarLabel(area, expanded: expanded)
             .foregroundStyle(model.area == area ? Palette.accent : Palette.text)
             .background(
               model.area == area ? Palette.selected : .clear, in: RoundedRectangle(cornerRadius: 6))
-        }.accessibilityLabel(area.rawValue).help(area.rawValue)
+        }.accessibilityLabel(area.rawValue).help(sidebarHelp(area))
+          .accessibilityValue(sidebarHelp(area))
           .accessibilityAddTraits(model.area == area ? .isSelected : [])
       }
       Spacer()
@@ -113,8 +115,49 @@ struct RootView: View {
       } label: {
         navigationLabel("设置", icon: "gearshape", expanded: expanded)
       }.accessibilityLabel("设置").help("设置")
-    }.buttonStyle(.plain).padding(8).frame(width: expanded ? 138 : 54)
+    }.buttonStyle(.plain).padding(8).frame(width: expanded ? 154 : 54)
       .background(Palette.sidebar, ignoresSafeAreaEdges: [])
+  }
+
+  private func sidebarHelp(_ area: WorkspaceArea) -> String {
+    switch area {
+    case .day:
+      switch model.daySidebarState {
+      case .updated: return "全天事项有更新，点击查看"
+      case .working: return "正在整理录音与全天事项"
+      case .failed: return "部分整理需重试，右上角可查看任务"
+      case .none: return area.rawValue
+      }
+    case .originals:
+      return model.pendingSyncBadgeHint.map { $0 + "，点击查看原件与同步操作" }
+        ?? "查看已保存原件与录音卡待同步录音"
+    case .live: return model.deviceStatus(at: Date()).title
+    case .device: return area.rawValue
+    }
+  }
+
+  private func sidebarLabel(_ area: WorkspaceArea, expanded: Bool) -> some View {
+    HStack(spacing: 8) {
+      Group {
+        if area == .live { SidebarLiveIndicator(model: model, meter: model.audioMeter) }
+        else { Image(systemName: area.icon).frame(width: 22, height: 18) }
+      }.font(.system(size: 15))
+        .overlay(alignment: .topTrailing) {
+          if !expanded {
+            sidebarIndicator(area).scaleEffect(0.75).offset(x: 8, y: -6)
+          }
+        }
+      if expanded {
+        Text(area.rawValue).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+        sidebarIndicator(area)
+      }
+    }.padding(.horizontal, 7).frame(maxWidth: .infinity, minHeight: 34)
+      .contentShape(Rectangle())
+  }
+
+  @ViewBuilder private func sidebarIndicator(_ area: WorkspaceArea) -> some View {
+    if area == .day { DaySidebarIndicator(state: model.daySidebarState) }
+    else if area == .originals { PendingSyncBadge(model: model) }
   }
 
   private func navigationLabel(_ title: String, icon: String, expanded: Bool) -> some View {

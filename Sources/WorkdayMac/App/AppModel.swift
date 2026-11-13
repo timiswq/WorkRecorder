@@ -29,6 +29,10 @@ enum Destination: String, CaseIterable {
   @Published var recordings: [Recording] = [] { didSet { invalidateDayInputs() } }
   @Published var documents: [String: ProcessingDocument] = [:] { didSet { invalidateDayInputs() } }
   @Published var summaries: [String: DaySummary] = [:] { didSet { cachedDays.removeAll() } }
+  @Published var dayUpdates = DayResultUpdates()
+  var dayUpdatesLoaded = false
+  var dayUpdatesRevision = 0
+  var dayUpdatesSaveTask: Task<Void, Never>?
   @Published private var organizations: [String: DayOrganization] = [:] { didSet { cachedDays.removeAll() } }
   @Published var selectedDay: String? = WorkdayDate.day(Date())
   @Published private(set) var originalsDay: String?
@@ -85,6 +89,7 @@ enum Destination: String, CaseIterable {
   var catalogRevision = 0
   var catalogSaveTask: Task<Void, Never>?
   let card = CardObserver()
+  let audioMeter = LiveAudioMeter()
   let usb = USBMonitor()
   let player = Player()
   @Published private(set) var captionHistory: CaptionHistory
@@ -110,7 +115,7 @@ enum Destination: String, CaseIterable {
   private var quitting = false
   @Published private(set) var processingPaused = false
   var processingIsAvailable: Bool { inference != nil || service != nil }
-  var isBusy: Bool { sync.isBusy || processingTask != nil || catalogSaveTask != nil }
+  var isBusy: Bool { sync.isBusy || processingTask != nil || catalogSaveTask != nil || dayUpdatesSaveTask != nil }
   var libraryURL: URL { store.root }
   var days: [String] { Array(Set(recordings.flatMap(WorkdayTimeline.days))).sorted(by: >) }
   var workspace: DayWorkspace {
@@ -192,12 +197,14 @@ enum Destination: String, CaseIterable {
     card.onInventory = { [weak self] value in self?.receiveInventory(value) }
     card.onAudio = { [weak self] data in
       guard let self else { return }
+      self.audioMeter.append(data, offset: recordingOffset)
       self.live.append(data, recordingOffset: recordingOffset)
       self.localCaptions.append(data, recordingOffset: recordingOffset)
       recordingOffset += data.count
     }
     card.onStreamReset = { [weak self] reason in
       guard let self else { return }
+      self.audioMeter.reset()
       if case .started = reason { recordingOffset = 0 }
       self.live.boundary(reason)
       self.localCaptions.boundary(reason)
@@ -347,6 +354,15 @@ enum Destination: String, CaseIterable {
       }
       self.organizations = organizations
       self.summaries = summaries
+      if !dayUpdatesLoaded {
+        let updates = try await loadingStore.dayResultUpdates()
+        guard loadingStore === store else { return }
+        dayUpdates = updates
+        try dayUpdates.seed(summaries.values.map { dayResultContent($0) })
+        dayUpdatesLoaded = true
+      }
+      for summary in summaries.values { try dayUpdates.record(dayResultContent(summary)) }
+      dayUpdates.retain(days: loadedDays)
       if needsInitialArea { showToday() }
     } catch { self.error = "本地资料读取失败：\(error.localizedDescription)" }
   }
@@ -578,6 +594,7 @@ enum Destination: String, CaseIterable {
           summary.inputFingerprint = version
           try await store.save(summary)
           summaries[day] = summary
+          recordDayUpdate(summary)
           attempted.remove("day:" + version)
           summaryErrors[day] = nil
         } catch {
@@ -919,6 +936,7 @@ enum Destination: String, CaseIterable {
       player.stop()
       preferences.libraryPath = url.path
       voices.stop()
+      audioMeter.reset()
       live.reset()
       localCaptions.reset()
       captionHistory.configureReview(nil, reviewer: nil)
@@ -937,6 +955,8 @@ enum Destination: String, CaseIterable {
       daySelections = [:]
       selectedDetail = nil
       summaryErrors = [:]
+      dayUpdates = DayResultUpdates()
+      dayUpdatesLoaded = false
       selectedDay = WorkdayDate.day(Date())
       needsInitialArea = true
       summaries = [:]
@@ -961,6 +981,7 @@ enum Destination: String, CaseIterable {
     queuedSummaryRetries.removeAll()
     desktop.stop()
     voices.stop()
+    audioMeter.reset()
     processingTask?.cancel()
     usb.stop()
     live.reset()
@@ -973,6 +994,7 @@ enum Destination: String, CaseIterable {
     await voices.waitForStoppedTasks()
     await sync.shutdown()
     await catalogSaveTask?.value
+    await dayUpdatesSaveTask?.value
     await processingTask?.value
   }
 }

@@ -105,6 +105,7 @@ extension AppModel {
 
 struct SyncStatusView: View {
   @ObservedObject var model: AppModel
+  var showsOriginalsAction = true
   @State private var showsDetails = false
 
   var body: some View {
@@ -130,7 +131,7 @@ struct SyncStatusView: View {
           if let action = state.action {
             Button(action.rawValue) { model.performCardSync(action) }
               .buttonStyle(.borderedProminent).accessibilityIdentifier("card-sync-action")
-          } else if state.hasSavedOriginals {
+          } else if state.hasSavedOriginals && showsOriginalsAction {
             Button("查看原始录音") { model.showOriginals() }.buttonStyle(.borderedProminent)
           }
           Button("同步详情") { showsDetails.toggle() }.buttonStyle(.link)

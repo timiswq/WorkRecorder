@@ -6,6 +6,54 @@ import XCTest
 @testable import WorkdayMac
 
 final class WorkspaceTests: XCTestCase {
+  @MainActor func testSavedResultsKeepPerDayUnreadUntilTheDisplayedVersionIsRead() async throws {
+    let root = try makeRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = AppModel(libraryURL: root.appendingPathComponent("Library"), inference: WorkspaceInference())
+    model.preferences.autoOrganize = false
+    for day in ["12", "13"] { try await add("note202611\(day)-090000.wav", to: model, at: root) }
+    await model.reload()
+    XCTAssertTrue(model.dayUpdates.unseenDays.isEmpty)
+    model.showOriginals()
+    model.retryProcessing()
+    try await finish(model)
+    XCTAssertEqual(Set(model.dayUpdates.unseenDays), ["2026-11-12", "2026-11-13"])
+    model.showDayUpdates()
+    XCTAssertEqual(model.area, .day)
+    let selected = try XCTUnwrap(model.selectedDay)
+    let signature = try XCTUnwrap(model.dayUpdates.signature(for: selected))
+    XCTAssertTrue(model.dayUpdates.isUnseen(selected), "点击入口不能直接清掉所有更新")
+    model.markDayViewed(selected, signature: signature)
+    XCTAssertEqual(model.dayUpdates.unseenDays.count, 1)
+    await model.shutdown()
+    let reopened = AppModel(libraryURL: model.libraryURL)
+    await reopened.reload()
+    XCTAssertEqual(reopened.dayUpdates.unseenDays.count, 1)
+    XCTAssertFalse(reopened.dayUpdates.isUnseen(selected))
+    await reopened.shutdown()
+  }
+
+  @MainActor func testNewTimelineItemIsAnUpdateEvenWhenOverviewIsUnchanged() async throws {
+    let root = try makeRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = AppModel(libraryURL: root.appendingPathComponent("Library"), inference: WorkspaceInference())
+    model.preferences.autoOrganize = false
+    try await add("note20261113-090000.wav", to: model, at: root)
+    await model.reload()
+    model.retryProcessing()
+    try await finish(model)
+    model.selectDay("2026-11-13")
+    model.markDayViewed("2026-11-13", signature: try XCTUnwrap(model.dayUpdates.signature(for: "2026-11-13")))
+    let overview = model.summaries["2026-11-13"]?.overview
+    try await add("note20261113-110000.wav", to: model, at: root)
+    await model.reload()
+    model.retryProcessing()
+    try await finish(model)
+    XCTAssertEqual(model.summaries["2026-11-13"]?.overview, overview)
+    XCTAssertTrue(model.dayUpdates.isUnseen("2026-11-13"), "时间线有新事项也应提示")
+    await model.shutdown()
+  }
+
   @MainActor func testSidebarReflectsDateChangesWithoutPublishingThemAgain() async throws {
     _ = NSApplication.shared
     let root = try makeRoot()

@@ -1,7 +1,43 @@
 import Foundation
 import WorkdayCore
 
+struct PendingOriginal: Identifiable {
+  let sourceID: String
+  let entry: InventoryEntry
+  var id: String { sourceID + "|" + entry.stem }
+}
+
 extension AppModel {
+  var pendingOriginals: [PendingOriginal] {
+    currentInventories.flatMap { inventory in
+      let linked = catalog.bindings[inventory.sourceID].map { Set([$0]) } ?? []
+      return inventory.pendingEntries(recordings: recordings, linkedSources: linked,
+        activeName: activeInventoryName(inventory.sourceID)).map { PendingOriginal(sourceID: inventory.sourceID, entry: $0) }
+    }
+  }
+  var pendingSyncBadge: Int? {
+    // A cached discovery still needs USB import. Freshness changes the explanation,
+    // not whether an already-known pending original deserves a reminder.
+    guard !usb.needsSaveConfirmation else { return nil }
+    let count = pendingCount.total
+    return count > 0 ? count : nil
+  }
+  private var pendingSyncCountIsComplete: Bool {
+    currentInventories.allSatisfy(\.complete)
+      && (usb.volumes.isEmpty || currentInventories.count == usb.volumes.count)
+  }
+  var pendingSyncBadgeText: String? {
+    guard let count = pendingSyncBadge else { return nil }
+    if count > 99 { return "99+" }
+    return pendingSyncCountIsComplete ? "\(count)" : "≥\(count)"
+  }
+  var pendingSyncBadgeHint: String? {
+    guard let count = pendingSyncBadge else { return nil }
+    let fresh = inventoryIsFresh
+    let prefix = (fresh ? "" : "上次发现 ") + (pendingSyncCountIsComplete ? "" : "至少 ")
+    return "\(prefix)\(count) 段录音尚未保存到 Mac"
+      + (fresh ? "" : "，连接录音卡后更新")
+  }
   var boundSource: String? { preferences.boundID.map { "ble:\($0)" } }
   var currentInventories: [DeviceInventory] {
     if !usb.volumes.isEmpty { return usb.volumes.compactMap { catalog.snapshots[$0.id] } }

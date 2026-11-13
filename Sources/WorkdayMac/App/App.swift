@@ -30,14 +30,18 @@ public struct WorkdayApp: App {
 
 @MainActor final class Lifecycle: NSObject, NSApplicationDelegate {
   let model = AppModel()
+  private var dockBadge: DockBadgeController?
   func applicationDidFinishLaunching(_ notification: Notification) {
     let capture =
       model.isolated && ProcessInfo.processInfo.environment["WORKDAY_SCENE_CAPTURE"] != nil
     NSApp.setActivationPolicy(capture ? .accessory : .regular)
+    if !capture { dockBadge = DockBadgeController(model: model, tile: NSApp.dockTile) }
     model.start()
   }
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    dockBadge?.stop()
+    dockBadge = nil
     Task {
       await model.shutdown()
       sender.reply(toApplicationShouldTerminate: true)
