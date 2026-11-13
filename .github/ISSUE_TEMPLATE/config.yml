@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 私密安全报告 / Private security report
+    url: https://github.com/timiswq/WorkRecorder/security/advisories/new
+    about: 请私下报告漏洞或隐私问题，避免在公开 Issue 中披露。

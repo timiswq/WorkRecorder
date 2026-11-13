@@ -18,6 +18,7 @@
   ],
   "files": [
     { "path": "README.md" },
+    { "path": "LICENSE", "target-membership": [ "WorkRecorder/resources" ] },
     { "path": "AGENTS.md" },
     { "kind": "folder", "path": "docs" },
     { "path": "Package.swift" },
@@ -158,7 +159,6 @@
     "DEAD_CODE_STRIPPING": "YES",
     "DEBUG_INFORMATION_FORMAT[config=Debug]": "dwarf",
     "DEBUG_INFORMATION_FORMAT[config=Release]": "dwarf-with-dsym",
-    "DEVELOPMENT_TEAM": "RFQ56XLHXJ",
     "ENABLE_NS_ASSERTIONS[config=Release]": "NO",
     "ENABLE_STRICT_OBJC_MSGSEND": "YES",
     "ENABLE_TESTABILITY[config=Debug]": "YES",

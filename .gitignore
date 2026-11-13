@@ -3,3 +3,39 @@
 .build/
 *.xcuserstate
 xcuserdata/
+
+# Local build and development output (keep artifacts outside the repository).
+DerivedData/
+build/
+dist/
+output/
+*.app/
+*.dSYM/
+*.xcarchive/
+*.xcresult/
+*.dmg
+*.log
+__pycache__/
+*.py[cod]
+.venv/
+
+# Credentials and machine-specific configuration.
+.env
+.env.*
+!.env.example
+*.p12
+*.p8
+*.pem
+*.key
+*.mobileprovision
+*.provisionprofile
+
+# Personal recordings and library data are never source assets.
+/fixtures/
+/Records/
+/Days/
+/Sync/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*

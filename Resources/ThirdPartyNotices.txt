@@ -1,3 +1,8 @@
+WorkRecorder / 工作留声 original source code and documentation are licensed
+under the MIT License. Copyright (c) 2026 Tim (timiswq).
+The project license is included in the app as LICENSE.
+Third-party components below retain their respective licenses.
+
 工作留声 includes the QS668Core protocol sources from the XKWork Recorder SDK.
 QS668 protocol reference: https://github.com/nextproto1024/ai-recorder-card-open-protocol
 Audio capture, file storage, networking and interface use Apple platform frameworks.

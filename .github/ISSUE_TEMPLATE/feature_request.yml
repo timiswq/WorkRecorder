@@ -1,0 +1,18 @@
+name: 功能建议 / Feature request
+description: 描述使用场景、遇到的困难和期望结果。
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 使用场景与问题 / Use case and problem
+      description: 谁在什么情况下遇到了什么困难？
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 期望结果 / Desired outcome
+      description: 说明可观察到的改善，可附替代方案。
+    validations:
+      required: true

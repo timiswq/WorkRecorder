@@ -1,0 +1,32 @@
+name: 问题报告 / Bug report
+description: 提供可复现步骤，帮助定位应用或录音卡问题。
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: 请勿上传 API Key、设备授权码、真实录音、声纹或个人资料库。安全问题请按 SECURITY.md 私下报告。
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境 / Environment
+      description: App 版本或提交、macOS、Mac 架构；构建问题加 Xcode 版本，设备问题加录音卡型号与固件。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      description: 从什么状态开始，执行了哪些操作，能否稳定复现？
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 预期与实际 / Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 脱敏证据 / Redacted evidence
+      description: 可选。相关错误、合成样本截图、是否影响卡上完整录音；请先检查隐私。

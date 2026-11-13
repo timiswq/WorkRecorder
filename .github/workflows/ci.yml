@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swiftpm:
+    name: SwiftPM tests and Release build
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Select external artifact directory
+        run: echo "WORKDAY_ARTIFACTS=$RUNNER_TEMP/WorkRecorder" >> "$GITHUB_ENV"
+      - name: Check toolchain and scripts
+        run: |
+          xcodebuild -version
+          swift --version
+          for file in script/*.sh; do bash -n "$file"; done
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+          for path in Path("script").glob("*.py"):
+              ast.parse(path.read_text(), filename=str(path))
+          PY
+      - name: Test without external fixtures or cloud credentials
+        run: ./script/test.sh
+      - name: Compile Release package
+        run: swift build --configuration release --scratch-path "$WORKDAY_ARTIFACTS/build/swift-debug"
