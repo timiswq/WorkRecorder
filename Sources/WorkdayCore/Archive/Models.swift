@@ -23,6 +23,7 @@ public struct Recording: Codable, Identifiable, Equatable, Sendable {
   public var sourceAliases: [String]?
   public var companionBytes: Int64?
   public var sourceID: String
+  public var wifiOriginal: WiFiOriginal?
   public var day: String { startedAt.map(WorkdayDate.day) ?? "日期未知" }
 }
 

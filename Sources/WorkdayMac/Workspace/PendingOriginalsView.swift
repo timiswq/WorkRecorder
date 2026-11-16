@@ -4,7 +4,9 @@ struct PendingOriginalsView: View {
   @ObservedObject var model: AppModel
   @State private var expanded = true
   var body: some View {
-    if !model.currentInventories.isEmpty || !model.usb.volumes.isEmpty {
+    if model.usesWiFiCard {
+      WiFiSyncControls(model: model, compact: true)
+    } else if !model.currentInventories.isEmpty || !model.usb.volumes.isEmpty {
       VStack(alignment: .leading, spacing: 10) {
         SyncStatusView(model: model, showsOriginalsAction: false)
         let pending = model.pendingOriginals

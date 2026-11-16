@@ -5,6 +5,11 @@ import WorkdayCore
 struct Preferences: Codable {
   var boundID: String?
   var boundName = "未绑定录音卡"
+  var recorderKind = RecorderKind.usb
+  var wifiBoundID: String?
+  var wifiBoundName: String?
+  var selectedRecorderID: String? { recorderKind == .wifi ? wifiBoundID : boundID }
+  var selectedRecorderName: String { recorderKind == .wifi ? wifiBoundName ?? "Wi-Fi 录音卡" : boundName }
   var autoConnect = true
   var autoSync = true
   var autoOrganize = true
@@ -26,11 +31,15 @@ struct Preferences: Codable {
   init() {}
   private enum CodingKeys: String, CodingKey {
     case boundID, boundName, autoConnect, autoSync, autoOrganize, cloudEnabled, realtime
+    case recorderKind, wifiBoundID, wifiBoundName
     case liveModel, recordingModel, theme, captions, workspaceID, libraryPath
   }
   init(from decoder: Decoder) throws {
     self.init()
     let values = try decoder.container(keyedBy: CodingKeys.self)
+    recorderKind = try values.decodeIfPresent(RecorderKind.self, forKey: .recorderKind) ?? .usb
+    wifiBoundID = try values.decodeIfPresent(String.self, forKey: .wifiBoundID)
+    wifiBoundName = try values.decodeIfPresent(String.self, forKey: .wifiBoundName)
     boundID = try values.decodeIfPresent(String.self, forKey: .boundID)
     boundName = try values.decodeIfPresent(String.self, forKey: .boundName) ?? boundName
     autoConnect = try values.decodeIfPresent(Bool.self, forKey: .autoConnect) ?? autoConnect

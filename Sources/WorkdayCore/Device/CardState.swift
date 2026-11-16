@@ -3,6 +3,8 @@ import QS668Core
 
 public typealias CardQuery = RecorderQuery
 
+public enum WiFiRecordingEvent: UInt8 { case started = 6, ended = 7, paused = 8, resumed = 9 }
+
 public struct CardState {
   public enum Phase: String { case unknown, recording, paused, idle, saving }
   public var connected = false
@@ -23,6 +25,30 @@ public struct CardState {
   private var starting = false
   private var lastHardwareEvent = Date.distantPast
   public init() {}
+  public mutating func updateWiFi(raw: UInt8, battery: Int?, at date: Date = Date()) {
+    // FW925 的状态应答只有 0 能确认空闲。暂停由成功的按键应答确认，非零轮询保留暂停状态。
+    let next: Phase
+    switch raw {
+    case 0: next = .idle
+    case _ where phase == .paused: next = .paused
+    case 1: next = .recording
+    default: next = .unknown
+    }
+    setPhase(next, at: date)
+    if next == .idle { filename = nil }
+    confirmedAt = date
+    self.battery = battery
+    batteryAt = date
+  }
+  public mutating func updateWiFi(event: WiFiRecordingEvent, filename: String?, at date: Date = Date()) {
+    switch event {
+    case .started, .resumed: setPhase(.recording, at: date)
+    case .paused: setPhase(.paused, at: date)
+    case .ended: setPhase(.idle, at: date)
+    }
+    self.filename = event == .ended ? nil : filename ?? self.filename
+    confirmedAt = date
+  }
   public func isFresh(at date: Date = Date()) -> Bool {
     guard connected, let confirmedAt else { return false }
     // 有按键订阅时，已确认的空闲状态可一直显示。录音时长仍以近期设备回复为准。

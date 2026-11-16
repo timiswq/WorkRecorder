@@ -45,12 +45,12 @@ struct SettingsView: View {
     return group("录音卡") {
       row {
         VStack(alignment: .leading, spacing: 5) {
-          Text(model.preferences.boundName).font(.system(size: 13, weight: .medium))
-          Text(status.isUSB ? status.title : status.bluetoothBlock?.instruction ?? model.card.status)
+          Text(model.preferences.selectedRecorderName).font(.system(size: 13, weight: .medium))
+          Text(model.usesWiFiCard && model.wifiSync.usingNetwork ? model.wifiSync.message : status.isUSB ? status.title : status.bluetoothBlock?.instruction ?? model.card.status)
             .font(.system(size: 11)).foregroundStyle(Palette.muted)
         }
         Spacer()
-        if !status.isUSB, model.card.state.connected {
+        if !model.usesWiFiCard, !status.isUSB, model.card.state.connected {
           Button("同步时间") { model.card.synchronizeClock() }
             .disabled(model.isolated || model.card.state.phase != .idle || !model.card.state.isFresh())
         }
@@ -58,26 +58,33 @@ struct SettingsView: View {
           BluetoothSettingsButton()
         } else if status.bluetoothBlock == nil, !status.isUSB {
           Button(model.card.state.connected ? "刷新状态" : (model.card.scanning ? "寻找中…" : "寻找设备")) { model.card.activate() }
-            .disabled(status.kind == .connecting || model.isolated)
+            .disabled(model.wifiSync.busy || status.kind == .connecting || model.isolated)
         }
       }
-      if status.canConnect {
+      if status.canConnect || model.card.state.connected || status.isUSB {
         row {
-          Button("扫描全部设备") { model.card.activate(.all) }
-            .disabled(model.isolated || model.card.connectionPhase == .usb)
+          Button(model.card.state.connected || status.isUSB ? "选择其他录音卡…" : "扫描全部设备") { model.card.findAnother() }
+            .disabled(model.isolated || !model.canChangeCard)
         }
       }
-      if !model.card.choices.isEmpty, status.canConnect || model.card.scanning && status.kind == .connecting {
+      if !model.card.choices.isEmpty, status.canConnect || model.card.scanning || status.isUSB && !model.card.state.connected {
         ForEach(model.card.choices) { choice in
           Divider()
           row {
             Text(choice.name)
+            if let kind = choice.kind { Text(kind.label).font(.caption).foregroundStyle(Palette.muted) }
             Spacer()
             Text("\(choice.rssi) dBm").font(.caption).foregroundStyle(Palette.muted)
-            Button("连接") { model.card.connect(choice.id) }.disabled(model.isolated)
+            Button("连接") { model.card.connect(choice.id) }.disabled(model.isolated || !model.canChangeCard)
           }
         }
       }
+      if let other = model.usesWiFiCard ? model.preferences.boundID : model.preferences.wifiBoundID {
+        let name = model.usesWiFiCard ? model.preferences.boundName : model.preferences.wifiBoundName ?? "Wi-Fi 录音卡"
+        Button("连接已记住的「\(name)」") { model.card.findAnother(id: other) }
+          .disabled(model.isolated || !model.canChangeCard)
+      }
+      if model.usesWiFiCard { WiFiSyncControls(model: model) }
       Divider()
       row {
         Text("打开时自动连接")

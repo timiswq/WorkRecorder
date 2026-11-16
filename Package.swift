@@ -11,6 +11,14 @@ let package = Package(
   ],
   targets: [
     .target(name: "QS668Core"),
+    .target(
+      name: "CRecorderOpus",
+      cSettings: [
+        .define("HAVE_CONFIG_H"),
+        .headerSearchPath("upstream"), .headerSearchPath("upstream/include"),
+        .headerSearchPath("upstream/celt"), .headerSearchPath("upstream/silk"),
+      ]),
+    .target(name: "WiFiRecorderCore", dependencies: ["CRecorderOpus"]),
     // Only the two macOS static binaries are needed for on-device speaker inference.
     .binaryTarget(
       name: "SherpaOnnxMacOS",
@@ -25,7 +33,7 @@ let package = Package(
     .target(
       name: "WorkdayCore",
       dependencies: [
-        "QS668Core",
+        "QS668Core", "WiFiRecorderCore",
         "SherpaOnnxMacOS", "OnnxruntimeMacOS",
       ],
       resources: [.copy("Resources/campplus.onnx"), .copy("Resources/silero_vad.onnx")],
@@ -34,12 +42,15 @@ let package = Package(
       ]),
     .target(
       name: "WorkdayMac",
-      dependencies: ["WorkdayCore", "QS668Core"],
+      dependencies: ["WorkdayCore", "QS668Core", "WiFiRecorderCore"],
       resources: [.copy("Resources/DockArtwork")]),
     .executableTarget(
       name: "WorkdayLauncher", dependencies: ["WorkdayMac"], path: "WorkRecorder",
       exclude: ["Assets.xcassets"]),
     .testTarget(name: "QS668CoreTests", dependencies: ["QS668Core"]),
+    .testTarget(
+      name: "WiFiRecorderCoreTests", dependencies: ["WiFiRecorderCore", "WorkdayCore", "WorkdayMac"],
+      resources: [.copy("Fixtures")]),
     .testTarget(
       name: "WorkdayCoreTests",
       dependencies: ["WorkdayCore", "QS668Core"]),

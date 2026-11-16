@@ -129,6 +129,13 @@ final class StatusWindowTests: XCTestCase {
     model.processingID = model.recordings.first?.id
     try await capture(RootView(model: model), name: "sidebar-day-processing", size: .init(width: 1100, height: 760))
     model.processingID = nil
+    model.preferences.recorderKind = .wifi
+    model.preferences.wifiBoundName = "Wi-Fi 录音卡"
+    model.card.state.connected = true
+    model.card.state.updateWiFi(raw: 0, battery: 86)
+    model.area = .device
+    try await capture(RootView(model: model), name: "wifi-device", size: .init(width: 960, height: 680))
+    try await capture(MenuBarPanel(model: model, desktop: model.desktop), name: "wifi-menu", size: .init(width: 340, height: 430))
     await model.shutdown()
   }
 }

@@ -2,9 +2,11 @@
 
 [简体中文](README.md) · [Contributing](CONTRIBUTING.md) · [License](LICENSE)
 
-A native macOS app for QS668 / CB08 recorder cards. Keep original recordings on your Mac, follow live captions, replay individual sentences, identify familiar speakers locally, and organize conversations into a daily timeline. Cloud transcription and summaries are optional.
+A native macOS app for QS668 / CB08 and B3085 (FW925) recorder cards. Keep original recordings on your Mac, follow live captions, replay individual sentences, identify familiar speakers locally, and organize conversations into a daily timeline. Cloud transcription and summaries are optional.
 
 Current development version: **0.7.0 (20260006)**. The baseline is tagged `baseline-2026-11-16`; development continues on `main`. This is an actively developed project. Automated tests do not establish real-device reliability, cloud availability, or speaker recognition accuracy in real meetings.
+
+Select the B3085 in device settings. After recording, choose **Sync recordings** to download files over the card’s Wi-Fi hotspot. The library keeps the device original and a playable WAV. Bluetooth audio in a supported format feeds the same captions and speaker recognition as the QS668 / CB08. Continuous live audio and the full sync flow still need verification on the FW925.
 
 ## Features
 
@@ -19,7 +21,7 @@ Current development version: **0.7.0 (20260006)**. The baseline is tagged `basel
 - Runtime: macOS 14 or later. Current delivery and local validation focus on Apple Silicon.
 - Full app build: **Xcode 27.2 or later**. The Xcode project uses the `project.xcproj` format.
 - SwiftPM tests: **Xcode 26.2 or later** and its macOS SDK. The package uses Swift tools 6.0 and Swift 5 language mode.
-- Recorder features: a compatible QS668 / CB08 card, Bluetooth, and a USB data connection.
+- Recorder features: Bluetooth and USB for the QS668 / CB08, or Bluetooth and Wi-Fi for the B3085 (FW925).
 - Optional cloud features: your own Bailian API key for the Beijing region, service access, and network connectivity. Provider charges may apply.
 
 You can build, run ordinary tests, and import local audio without a recorder card. Initial dependency resolution needs internet access. Apple speech recognition needs an available on-device language model. SwiftPM compiles modules and tests; the Xcode project packages the full app's permissions, icons, and license resources.
@@ -60,7 +62,8 @@ GitHub Actions runs ordinary SwiftPM tests and Release compilation. Hardware, pa
 | `WorkRecorder/` | App entry point |
 | `Sources/WorkdayMac/` | SwiftUI / AppKit UI and application coordination |
 | `Sources/WorkdayCore/` | Archival, audio, captions, processing, timeline, and speaker inference |
-| `Sources/QS668Core/` | BLE protocol, session, framing, and write queue |
+| `Sources/QS668Core/` | QS668 / CB08 BLE protocol, session, framing, and write queue |
+| `Sources/WiFiRecorderCore/`, `Sources/CRecorderOpus/` | FW925 protocol, live audio adaptation and device-file decoding. See the [Wi-Fi recorder development guide](docs/Wi-Fi录音卡开发指南.md). |
 | `Tests/` | Protocol, core, and macOS tests |
 | `Resources/` | Icons, permissions, and third-party notices |
 | `script/` | Build, test, packaging, and validation tools |
@@ -76,4 +79,4 @@ The default library is `~/Documents/工作留声/`. Audio, transcripts, summarie
 
 Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request and [SECURITY.md](SECURITY.md) for private vulnerability reporting. Do not attach real recordings, credentials, voice samples, or a personal library to public issues.
 
-Original project code and documentation are under the [MIT License](LICENSE). Third-party code and models retain their own licenses, including Apache-2.0 and MIT. See [dependency provenance](docs/第三方依赖.md), [bundled notices](Resources/ThirdPartyNotices.txt), and [license texts](Resources/VoiceLicenses).
+Original project code and documentation are under the [MIT License](LICENSE). Third-party code and models retain their own licenses, including BSD-3-Clause, Apache-2.0 and MIT. See [dependency provenance](docs/第三方依赖.md), [bundled notices](Resources/ThirdPartyNotices.txt), and [license texts](Resources/VoiceLicenses).

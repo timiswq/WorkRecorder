@@ -174,7 +174,8 @@ struct RecordingCardView: View {
                 .borderedProminent)
             }
           }
-          if !status.isUSB { SyncStatusView(model: model) }
+          if model.usesWiFiCard { WiFiSyncControls(model: model) }
+          else if !status.isUSB { SyncStatusView(model: model) }
           Divider()
           AppActivityList(model: model, desktop: desktop, includesSync: false)
           Divider()
@@ -182,8 +183,8 @@ struct RecordingCardView: View {
             VStack(alignment: .leading, spacing: 14) {
               Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
                 detail(
-                  "蓝牙绑定", model.preferences.boundID == nil ? "尚未绑定" : model.preferences.boundName)
-                if !model.usb.volumes.isEmpty {
+                  "蓝牙绑定", model.preferences.selectedRecorderID == nil ? "尚未绑定" : model.preferences.selectedRecorderName)
+                if !model.usesWiFiCard, !model.usb.volumes.isEmpty {
                   detail("USB 磁盘", model.usb.volumes.map(\.name).joined(separator: "、"))
                 } else if model.card.state.connected {
                   if let battery = status.battery {
@@ -203,7 +204,7 @@ struct RecordingCardView: View {
               }
               HStack(spacing: 14) {
                 Button("设备设置…") { model.requestSettings(.device) }
-                if let volume = model.usb.volumes.first {
+                if !model.usesWiFiCard, let volume = model.usb.volumes.first {
                   Button("在访达中查看磁盘") { NSWorkspace.shared.open(volume.url) }
                 }
               }

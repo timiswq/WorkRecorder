@@ -127,6 +127,7 @@ struct MenuBarPanel: View {
 
   private func quickActions(_ presentation: StatusPresentation) -> some View {
     VStack(alignment: .leading, spacing: 0) {
+      if model.usesWiFiCard { WiFiSyncControls(model: model, compact: true) } else {
       Button { show(.live) } label: {
         VStack(alignment: .leading, spacing: 2) {
           HStack {
@@ -162,6 +163,7 @@ struct MenuBarPanel: View {
             ? "仅隐藏或恢复桌面气泡，不关闭语音识别，也不改变录音状态"
             : "打开字幕设置；不会直接启用语音识别")
       }.padding(.horizontal, 4).frame(height: 28)
+      }
     }
   }
 

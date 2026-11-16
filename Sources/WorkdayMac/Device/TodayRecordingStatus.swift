@@ -11,7 +11,8 @@ struct TodayRecordingStatus: View {
         if model.dayRecordings.isEmpty {
           Text("今天还没有录音保存到 Mac").font(.title2.weight(.semibold))
         }
-        nextStep(status)
+        if model.usesWiFiCard { WiFiSyncControls(model: model, compact: true) }
+        else { nextStep(status) }
       }.frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("today-recording-status")

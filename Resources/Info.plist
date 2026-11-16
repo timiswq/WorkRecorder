@@ -13,6 +13,9 @@
 <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSBluetoothAlwaysUsageDescription</key><string>工作留声通过蓝牙查看录音卡状态，并在你开启实时文字时接收音频。录音开始与结束由设备操作。</string>
+<key>NSLocalNetworkUsageDescription</key><string>工作留声连接录音卡热点，将已保存的录音下载到你的 Mac。</string>
+<key>NSLocationUsageDescription</key><string>工作留声使用定位权限识别录音卡 Wi-Fi 热点及原网络，以便同步后恢复连接。</string>
+<key>NSLocationWhenInUseUsageDescription</key><string>工作留声使用定位权限识别录音卡热点，不读取地理坐标。</string>
 <key>NSRemovableVolumesUsageDescription</key><string>工作留声从通过 USB 连接的录音卡复制完整录音，保存到你的 Mac。</string>
 <key>NSDocumentsFolderUsageDescription</key><string>工作留声将完整录音、对话剪辑和文字保存在你选择的本地资料库。</string>
 <key>NSHighResolutionCapable</key><true/>

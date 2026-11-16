@@ -344,7 +344,7 @@ struct PendingCaption: Equatable {
       clearUnsentAudio()
       resetActivity()
       hasGap = true
-      waitingMessage = "音频接收出现缺口，等待后续音频；完整内容请在 USB 同步后查看。"
+      waitingMessage = "音频接收出现缺口，等待后续音频；完整内容请在同步录音后查看。"
       finishActive()
       if sessions.isEmpty, phase != .failed { showWaiting() }
     }

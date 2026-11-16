@@ -18,6 +18,7 @@ extension AppModel {
   var pendingSyncBadge: Int? {
     // A cached discovery still needs USB import. Freshness changes the explanation,
     // not whether an already-known pending original deserves a reminder.
+    if usesWiFiCard { return wifiSync.pending.flatMap { $0 > 0 ? $0 : nil } }
     guard !usb.needsSaveConfirmation else { return nil }
     let count = pendingCount.total
     return count > 0 ? count : nil
@@ -29,17 +30,20 @@ extension AppModel {
   var pendingSyncBadgeText: String? {
     guard let count = pendingSyncBadge else { return nil }
     if count > 99 { return "99+" }
+    if usesWiFiCard { return "\(count)" }
     return pendingSyncCountIsComplete ? "\(count)" : "≥\(count)"
   }
   var pendingSyncBadgeHint: String? {
     guard let count = pendingSyncBadge else { return nil }
+    if usesWiFiCard { return "本轮 Wi-Fi 清单还有 \(count) 段待下载" }
     let fresh = inventoryIsFresh
     let prefix = (fresh ? "" : "上次发现 ") + (pendingSyncCountIsComplete ? "" : "至少 ")
     return "\(prefix)\(count) 段录音尚未保存到 Mac"
       + (fresh ? "" : "，连接录音卡后更新")
   }
-  var boundSource: String? { preferences.boundID.map { "ble:\($0)" } }
+  var boundSource: String? { (usesWiFiCard ? nil : preferences.boundID).map { "ble:\($0)" } }
   var currentInventories: [DeviceInventory] {
+    if usesWiFiCard { return [] }
     if !usb.volumes.isEmpty { return usb.volumes.compactMap { catalog.snapshots[$0.id] } }
     if let boundSource {
       let sources = [boundSource, catalog.bindings[boundSource]].compactMap { $0 }

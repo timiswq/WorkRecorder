@@ -88,13 +88,17 @@ extension AppModel {
     let caption = captionStatus(at: now, hardware: hardware)
     let hardwareAction: StatusAction?
     if hardware.bluetoothBlock?.usesSettings == true { hardwareAction = .bluetoothSettings }
-    else if hardware.canConnect { hardwareAction = preferences.boundID == nil ? .bind : .reconnect }
+    else if hardware.canConnect { hardwareAction = preferences.selectedRecorderID == nil ? .bind : .reconnect }
     else if hardware.kind == .unknown { hardwareAction = .refreshCard }
     else if hardware.kind == .recording { hardwareAction = .live }
     else { hardwareAction = nil }
 
     var activities: [StatusActivity] = []
-    if !usb.volumes.isEmpty || pendingCount.total > 0 {
+    if usesWiFiCard, wifiSync.busy || !wifiSync.result.isEmpty {
+      activities.append(.init(id: "sync", title: wifiSync.busy ? wifiSync.message : "Wi-Fi 录音同步",
+                              detail: wifiSync.result, state: wifiSync.busy ? .working : .information,
+                              action: .device))
+    } else if !usesWiFiCard && (!usb.volumes.isEmpty || pendingCount.total > 0) {
       let sync = cardSync
       let state: StatusActivity.State
       if sync.action != nil || sync.phase == .unsupported { state = .needsAction }
@@ -197,8 +201,14 @@ extension AppModel {
                 _ action: StatusAction? = nil, error: String? = nil) -> StatusActivity {
       .init(id: "caption", title: title, detail: detail, state: state, action: action, error: error)
     }
+    if usesWiFiCard && wifiSync.usingNetwork {
+      return status("正在同步录音", "返回蓝牙连接后可继续接收实时字幕。", .waiting, .live)
+    }
     if hardware.isUSB { return status("实时字幕暂停", "USB 连接期间暂停接收实时音频；已有字幕仍可查看。", .waiting, .live) }
     if !preferences.captions.enabled { return status("实时字幕已关闭", "录音卡的录音状态独立更新。", .waiting, .captionSettings) }
+    if usesWiFiCard, let issue = card.wifiAudioIssue {
+      return status("实时音频暂不可用", issue, .waiting, .live)
+    }
     if localCaptions.canRetry {
       return status("实时字幕暂不可用", "本机识别遇到问题；这不代表录音卡已停止录音。", .needsAction, .retryCaptions,
                     error: localCaptions.status)

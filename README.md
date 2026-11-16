@@ -2,7 +2,7 @@
 
 [English](README.en.md) · [使用指南](docs/使用指南.md) · [开发指南](docs/开发指南.md) · [参与贡献](CONTRIBUTING.md)
 
-配合 QS668 / CB08 录音卡使用的原生 macOS 应用：保存完整录音、显示实时字幕、逐句回听、在本地识别熟人，并按日期整理事项。音频和资料库保存在自己的 Mac，云端转写与整理按需开启。
+原生 macOS 录音整理应用。QS668 / CB08 支持实时字幕和 USB 原件同步，B3085（FW925）通过 Wi-Fi 同步录音原件，也可用收到的蓝牙音频生成字幕。FW925 的持续实时收音和完整同步流程仍待真机验收。两类录音都能在同一资料库回听、转写和整理。音频和资料库保存在自己的 Mac，云端转写与整理按需开启。
 
 当前开发版本为 **0.7.0（20260006）**，开发基线标签为 `baseline-2026-11-16`。`main` 继续演进；功能和验证范围见[项目基线](docs/项目基线.md)与[更新记录](CHANGELOG.md)。项目仍在开发中，实体录音卡、不同系统版本和真实会议需要各自验收。
 
@@ -21,7 +21,7 @@
 | 运行 App | macOS 14 或更新；当前交付与实测以 Apple Silicon 为主 |
 | 构建完整 App | Xcode 27.2 或更新，包含 macOS SDK；工程采用 `project.xcproj` 格式 |
 | SwiftPM 测试 | Xcode 26.2 或更新的工具链与 macOS SDK；`Package.swift` 使用 Swift tools 6.0、Swift 5 语言模式 |
-| 录音卡功能 | QS668 / CB08 兼容设备、蓝牙与 USB 数据连接 |
+| 录音卡功能 | QS668 / CB08 使用蓝牙和 USB。B3085（FW925）使用蓝牙及 Wi-Fi 热点 |
 | 云端功能（可选） | 自行配置百炼北京地域 API Key、网络及服务权限；调用可能产生服务商费用 |
 
 没有录音卡也可以构建、运行普通测试、导入本地音频和浏览已有资料库。首次解析 SwiftPM 依赖需要网络，系统本地听写还依赖可用的 Apple 语音模型。SwiftPM 可编译模块与测试，完整 App 的图标、权限和许可资源由 Xcode 工程打包。
@@ -62,6 +62,7 @@ cd WorkRecorder
 | `WorkRecorder/` | App 启动入口 |
 | `Sources/WorkdayMac/` | SwiftUI / AppKit 界面与应用协调 |
 | `Sources/WorkdayCore/` | 归档、音频、字幕、处理流水线、时间线与声纹 |
+| `Sources/WiFiRecorderCore/`、`Sources/CRecorderOpus/` | Wi-Fi 卡协议、实时蓝牙音频适配、断点下载与本地 Opus 文件解码 |
 | `Sources/QS668Core/` | 录音卡协议、蓝牙会话、封包与写入队列 |
 | `Tests/` | 协议、业务与 macOS 界面的测试 |
 | `Resources/` | App 图标、权限与第三方许可 |
@@ -71,11 +72,12 @@ cd WorkRecorder
 - [使用指南](docs/使用指南.md)：归档、字幕、声纹、事项整理、备份。
 - [开发指南](docs/开发指南.md)与[架构说明](docs/架构说明.md)：目录职责、数据流、调试和测试。
 - [隐私与数据](docs/隐私与数据.md)：本地资料、云端发送内容与分享日志前的处理。
-- [录音卡使用指南](docs/录音卡使用指南.md)与[录音卡协议](docs/录音卡协议.md)：接入、按键和通信契约。
+- QS668 / CB08 的接入、按键和通信契约见[录音卡使用指南](docs/录音卡使用指南.md)与[录音卡协议](docs/录音卡协议.md)。
+- B3085 / FW925 的蓝牙实时传声、Wi-Fi 原件同步和真机联调步骤见 [Wi-Fi 录音卡开发指南](docs/Wi-Fi录音卡开发指南.md)。
 - [贡献指南](CONTRIBUTING.md)与[安全问题报告](SECURITY.md)：提交 Issue、Pull Request 和漏洞报告。
 
 ## 许可与致谢
 
-本项目原创源码和文档采用 [MIT 许可证](LICENSE)。录音卡协议源码、sherpa-onnx、ONNX Runtime、CAM++ 和 Silero VAD 分别遵循其上游许可证；模型权重和第三方代码不因本仓库的 MIT 许可而改变许可。来源、版本和模型 SHA-256 见[第三方依赖](docs/第三方依赖.md)、[随包声明](Resources/ThirdPartyNotices.txt)和[完整许可文本](Resources/VoiceLicenses)。
+本项目原创源码和文档采用 [MIT 许可证](LICENSE)。录音卡协议源码、Opus、sherpa-onnx、ONNX Runtime、CAM++ 和 Silero VAD 分别遵循其上游许可证；模型权重和第三方代码不因本仓库的 MIT 许可而改变许可。来源、版本和模型 SHA-256 见[第三方依赖](docs/第三方依赖.md)、[随包声明](Resources/ThirdPartyNotices.txt)和[完整许可文本](Resources/VoiceLicenses)。
 
 感谢 [NextProto 录音卡开放协议](https://github.com/nextproto1024/ai-recorder-card-open-protocol)、[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)、[3D-Speaker](https://github.com/modelscope/3D-Speaker)、[ONNX Runtime](https://github.com/microsoft/onnxruntime)和[Silero VAD](https://github.com/snakers4/silero-vad)。

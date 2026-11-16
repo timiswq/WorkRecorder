@@ -88,6 +88,9 @@ enum Destination: String, CaseIterable {
   @Published var catalog = DeviceCatalog()
   var catalogRevision = 0
   var catalogSaveTask: Task<Void, Never>?
+  private(set) var wifiSync: WiFiRecordingSync
+  var canChangeCard: Bool { !sync.isBusy && !wifiSync.busy && card.canSwitch }
+  var usesWiFiCard: Bool { preferences.recorderKind == .wifi }
   let card = CardObserver()
   let audioMeter = LiveAudioMeter()
   let usb = USBMonitor()
@@ -136,7 +139,7 @@ enum Destination: String, CaseIterable {
   private var quitting = false
   @Published private(set) var processingPaused = false
   var processingIsAvailable: Bool { inference != nil || service != nil }
-  var isBusy: Bool { sync.isBusy || processingTask != nil || catalogSaveTask != nil || dayUpdatesSaveTask != nil }
+  var isBusy: Bool { wifiSync.busy || sync.isBusy || processingTask != nil || catalogSaveTask != nil || dayUpdatesSaveTask != nil }
   var libraryURL: URL { store.root }
   var days: [String] { Array(Set(recordings.flatMap(WorkdayTimeline.days))).sorted(by: >) }
   var workspace: DayWorkspace {
@@ -200,6 +203,7 @@ enum Destination: String, CaseIterable {
     captionHistory = CaptionHistory(root: store.root)
     voices = VoiceRecognition(root: store.root)
     self.store = store
+    wifiSync = WiFiRecordingSync(store: store, card: card)
     sync = SyncCoordinator(store: store)
     pipeline = ProcessingPipeline(store: store)
     for publisher in [
@@ -215,10 +219,9 @@ enum Destination: String, CaseIterable {
     }
     $captionHistory.map(\.reviewCompleted).switchToLatest()
       .sink { [weak self] in self?.objectWillChange.send() }.store(in: &subscriptions)
-    card.onBound = { [weak self] id, name in
-      self?.preferences.boundID = id
-      self?.preferences.boundName = name
-    }
+    attachWiFiSync()
+    card.onBound = { [weak self] id, name in self?.rememberCard(.usb, id: id, name: name) }
+    card.onWiFiBound = { [weak self] id, name in self?.rememberCard(.wifi, id: id, name: name) }
     card.onPause = { [weak self] name, gap in self?.receivePause(name: name, pause: gap) }
     card.onInventory = { [weak self] value in self?.receiveInventory(value) }
     card.onAudio = { [weak self] data in
@@ -247,11 +250,11 @@ enum Destination: String, CaseIterable {
     }
     usb.onConnection = { [weak self] connected in
       guard let self else { return }
-      let needsSave = connected && [.recording, .paused, .saving].contains(self.card.state.phase)
+      let needsSave = !self.usesWiFiCard && connected && [.recording, .paused, .saving].contains(self.card.state.phase)
       let name = self.card.state.filename
       self.usb.excludedStems = needsSave ? Set(name.map { [InventoryEntry.stem($0)] } ?? []) : []
       self.usb.activeFilenameUnknown = needsSave && name == nil
-      self.card.suspendForUSB(connected)
+      if !self.usesWiFiCard { self.card.suspendForUSB(connected) }
       self.sync.retry()
     }
     usb.onScan = { [weak self] scan in self?.receiveUSBScan(scan) }
@@ -316,6 +319,7 @@ enum Destination: String, CaseIterable {
       } catch { self.error = error.localizedDescription }
       await reload()
       loading = false
+      wifiSync.retryLocal()
       if !isolated {
         usb.start()
         if preferences.autoConnect { card.activate() }
@@ -327,7 +331,8 @@ enum Destination: String, CaseIterable {
     }
   }
   private func applyPreferences() {
-    card.boundID = preferences.boundID
+    card.boundID = preferences.selectedRecorderID
+    card.preferredKind = preferences.recorderKind
     card.autoConnect = preferences.autoConnect
     if preferences.autoSync, !manualSyncVolumes.isEmpty { manualSyncVolumes = [] }
     configureCaptions(service: service)
@@ -414,6 +419,32 @@ enum Destination: String, CaseIterable {
       scheduleProcessing()
     } catch { self.error = error.localizedDescription }
   }
+  private func rememberCard(_ kind: RecorderKind, id: String, name: String) {
+    var next = preferences
+    if next.selectedRecorderID != id { wifiSync.clearDeviceResult() }
+    next.recorderKind = kind
+    if kind == .wifi { next.wifiBoundID = id; next.wifiBoundName = name }
+    else { next.boundID = id; next.boundName = name }
+    if kind == .wifi && !usesWiFiCard { sync.updateUSB([], stableFiles: [], volumes: []) }
+    preferences = next
+    if kind == .usb && !usb.volumes.isEmpty { card.suspendForUSB(true) }
+  }
+
+  func startWiFiSync() {
+    guard usesWiFiCard, !isolated, let id = preferences.wifiBoundID else { return }
+    wifiSync.start(id: id, after: processingTask)
+  }
+
+  private func attachWiFiSync() {
+    wifiSync.attach()
+    wifiSync.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &subscriptions)
+    wifiSync.onArchiveChange = { [weak self] in
+      guard let self, !self.quitting else { return }
+      await self.reload()
+      self.scheduleProcessing()
+    }
+  }
+
   func configureChanged() {
     applyPreferences()
     if preferences.autoConnect, !isolated { card.activate() }
@@ -538,6 +569,7 @@ enum Destination: String, CaseIterable {
     sync.offer(candidates)
   }
   private func receiveUSBScan(_ scan: USBScan) {
+    guard !usesWiFiCard else { return }
     associateUSB(scan.ready)
     receiveUSBInventories(scan.inventories)
     // A manual run covers the mounted cards until their saved recordings are copied.
@@ -566,7 +598,7 @@ enum Destination: String, CaseIterable {
     if !isolated { usb.refresh() }
   }
   func scheduleProcessing(force: Bool = false, scope: ProcessingScope = .all) {
-    guard !quitting, !processingPaused, processingTask == nil,
+    guard !quitting, !wifiSync.blocksProcessing, !processingPaused, processingTask == nil,
       inference != nil || service != nil
     else { return }
     let runScope = preferences.autoOrganize || force
@@ -1000,6 +1032,9 @@ enum Destination: String, CaseIterable {
       captionHistory = CaptionHistory(root: url)
       configureCaptions(service: service)
       store = ArchiveStore(root: url)
+      wifiSync = WiFiRecordingSync(store: store, card: card)
+      attachWiFiSync()
+      wifiSync.retryLocal()
       voices = VoiceRecognition(root: url)
       attachVoices()
       sync = SyncCoordinator(store: store)
@@ -1044,6 +1079,7 @@ enum Destination: String, CaseIterable {
     usb.stop()
     live.reset()
     localCaptions.reset()
+    await wifiSync.shutdown()
     card.disconnect()
     player.stop()
     await localCaptions.waitForSpeechActivityToStop()
