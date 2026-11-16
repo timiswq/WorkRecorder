@@ -4,15 +4,15 @@
 
 A native macOS app for QS668 / CB08 recorder cards. Keep original recordings on your Mac, follow live captions, replay individual sentences, identify familiar speakers locally, and organize conversations into a daily timeline. Cloud transcription and summaries are optional.
 
-Current development version: **0.6.0 (20260005)**. The baseline is tagged `baseline-2026-11-13`; development continues on `main`. This is an actively developed project. Automated tests do not establish real-device reliability, cloud availability, or speaker recognition accuracy in real meetings.
+Current development version: **0.7.0 (20260006)**. The baseline is tagged `baseline-2026-11-16`; development continues on `main`. This is an actively developed project. Automated tests do not establish real-device reliability, cloud availability, or speaker recognition accuracy in real meetings.
 
 ## Features
 
 - USB archival with file-size and SHA-256 verification before configured cleanup of card copies.
 - Apple on-device captions, optional Alibaba Cloud Bailian transcription, 24-hour caption history, and sentence replay.
-- Desktop caption bubbles, recorder status, pending-sync indicators, and a Dock badge.
-- Local CAM++ speaker embeddings and Silero voice activity detection, with identity confirmation and correction.
-- Daily conversations, decisions, tasks, manual organization, and continuous playback across recordings.
+- Dismissible desktop captions, a menu bar status panel, and a Dock icon that changes with recorder state and shows the pending-sync count.
+- Live speaker matching with local CAM++ and Silero models. Confirm or correct a speaker, review samples, or reset the sample library in Settings.
+- Daily overviews and transcripts grouped by morning, afternoon, and evening. Follow processing progress or replay recordings from the time-of-day scrubber.
 
 ## Requirements
 

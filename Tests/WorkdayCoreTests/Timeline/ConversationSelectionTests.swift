@@ -89,7 +89,7 @@ final class ConversationSelectionTests: XCTestCase {
     try await store.save(saved, recording: recording)
     let result = try await ProcessingPipeline(store: store).process(recording, service: cloud)
     XCTAssertEqual(result.phase, "complete")
-    XCTAssertEqual(result.label, "已整理 · 7 句交由全天归类")
+    XCTAssertEqual(result.label, "已生成文字与事项 · 7 句保留为原话")
     XCTAssertEqual(result.analyzedBatches, 3)
     XCTAssertEqual(result.conversations.map(\.lineIDs), [["5:0"]])
     let reopened = try await ArchiveStore(root: store.root).document(for: recording)

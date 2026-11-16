@@ -2,25 +2,30 @@ import AppKit
 
 guard CommandLine.arguments.count == 2 else { fatalError("Supply an external iconset output directory") }
 let directory = URL(fileURLWithPath: CommandLine.arguments[1])
+let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+    .appendingPathComponent("Sources/WorkdayMac/Resources/DockArtwork/CompanionNormal.png")
+guard let artwork = NSImage(contentsOf: source),
+      let original = artwork.cgImage(forProposedRect: nil, context: nil, hints: nil)
+else { fatalError("Missing approved Dock companion artwork: \(source.path)") }
 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 for size in [16, 32, 128, 256, 512] {
     for scale in [1, 2] {
         let pixels = size * scale
-        let image = NSImage(size: NSSize(width: pixels, height: pixels))
-        image.lockFocus()
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+                                      bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                      isPlanar: false, colorSpaceName: .deviceRGB,
+                                      bytesPerRow: 0, bitsPerPixel: 0)!
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+        let context = NSGraphicsContext.current!.cgContext
         let side = CGFloat(pixels)
-        NSColor(srgbRed: 0.94, green: 0.96, blue: 0.92, alpha: 1).setFill()
-        NSBezierPath(roundedRect: NSRect(x: side * 0.08, y: side * 0.08, width: side * 0.84, height: side * 0.84), xRadius: side * 0.19, yRadius: side * 0.19).fill()
-        NSColor(srgbRed: 0.20, green: 0.42, blue: 0.32, alpha: 1).setStroke()
-        let heights: [CGFloat] = [0.13, 0.28, 0.45, 0.26, 0.36, 0.17]
-        for (index, height) in heights.enumerated() {
-            let path = NSBezierPath(); path.lineWidth = side * 0.045; path.lineCapStyle = .round
-            let x = side * (0.285 + CGFloat(index) * 0.086)
-            path.move(to: NSPoint(x: x, y: side * (0.5 - height / 2))); path.line(to: NSPoint(x: x, y: side * (0.5 + height / 2))); path.stroke()
-        }
-        image.unlockFocus()
-        let representation = NSBitmapImageRep(data: image.tiffRepresentation!)!
+        context.clear(CGRect(x: 0, y: 0, width: side, height: side))
+        context.interpolationQuality = .high
+        let frame = NSRect(x: side * 0.08, y: side * 0.08, width: side * 0.84, height: side * 0.84)
+        NSBezierPath(roundedRect: frame, xRadius: side * 0.19, yRadius: side * 0.19).addClip()
+        context.draw(original, in: frame)
+        NSGraphicsContext.restoreGraphicsState()
         let filename = "icon_\(size)x\(size)" + (scale == 2 ? "@2x" : "") + ".png"
-        try representation.representation(using: .png, properties: [:])!.write(to: directory.appendingPathComponent(filename))
+        try bitmap.representation(using: .png, properties: [:])!.write(to: directory.appendingPathComponent(filename))
     }
 }

@@ -7,9 +7,12 @@ import WorkdayCore
   @Published private(set) var excerptRate: Float = 1
 
   func setExcerptRate(_ rate: Float) {
+    guard [Float(0.75), 1, 1.25, 1.5, 2].contains(rate) else { return }
     excerptRate = rate
-    if selectionID?.hasPrefix("excerpt:") == true { engine?.rate = rate }
+    engine?.rate = rate
   }
+
+  var playbackRate: Float { engine?.rate ?? excerptRate }
 
   @Published var title = ""
   @Published var position: Double = 0
@@ -37,12 +40,6 @@ import WorkdayCore
     return self.recordingID == recordingID && start <= position && position < end
   }
 
-  var heardDuration: Double {
-    guard let route else { return 0 }
-    let span = route.spans[spanIndex]
-    return route.spans.prefix(spanIndex).reduce(0) { $0 + $1.duration }
-      + max(0, min(span.duration, position - span.sourceStart))
-  }
   var dayClock: Double {
     guard let span = route?.spans[spanIndex] else { return 0 }
     return span.clockStart + max(0, min(span.duration, position - span.sourceStart))
@@ -147,9 +144,8 @@ import WorkdayCore
         url = file
       }
       engine?.pause()
-      let excerpt = id.hasPrefix("excerpt:")
-      engine?.enableRate = excerpt
-      if excerpt { engine?.rate = excerptRate }
+      engine?.enableRate = true
+      engine?.rate = excerptRate
       playing = false
       seek(offset)
       if autoplay { beginPlaying() }

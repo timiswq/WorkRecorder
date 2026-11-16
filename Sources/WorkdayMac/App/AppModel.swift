@@ -103,6 +103,9 @@ enum Destination: String, CaseIterable {
   let desktop = DesktopCompanion()
   let isolated: Bool
   let demo: Bool
+  let liveVoiceValidation: Bool
+  var liveValidationTask: Task<Void, Never>?
+  var receivedLiveAudioBytes: Int { recordingOffset }
   private(set) var store: ArchiveStore
   private var pipeline: ProcessingPipeline
   private var key: String?
@@ -110,6 +113,24 @@ enum Destination: String, CaseIterable {
   private let fileReviewer: (any CaptionFileTranscribing)?
   private var subscriptions = Set<AnyCancellable>()
   private var processingTask: Task<Void, Never>?
+  @Published private(set) var scheduledRecordingIDs = Set<String>()
+  @Published private(set) var scheduledSummaryDays = Set<String>()
+  private var automaticProcessingScope: ProcessingScope?
+  var processingIsRunning: Bool { processingTask != nil }
+
+  func recordingIsScheduled(_ recording: Recording) -> Bool {
+    guard !processingPaused else { return false }
+    if queuedRecordingRetries.contains(recording.id) || scheduledRecordingIDs.contains(recording.id) { return true }
+    return processingIsRunning && automaticProcessingScope?.includes(recording) == true
+      && documents[recording.id]?.phase != "complete" && !attempted.contains(recording.id)
+  }
+
+  func summaryIsScheduled(_ day: String) -> Bool {
+    guard !processingPaused, !summaryIsCurrent(day) else { return false }
+    if queuedSummaryRetries.contains(day) || scheduledSummaryDays.contains(day) { return true }
+    return processingIsRunning && automaticProcessingScope?.summaryDays(in: recordings).contains(day) == true
+      && !attempted.contains("day:" + summaryVersion(day))
+  }
   private var attempted = Set<String>()
   private var started = false
   private var quitting = false
@@ -144,9 +165,6 @@ enum Destination: String, CaseIterable {
     guard let saved = summaries[day]?.inputFingerprint else { return false }
     return saved == summaryVersion(day)
   }
-  var dayComplete: Bool {
-    !dayRecordings.isEmpty && dayRecordings.allSatisfy { documents[$0.id]?.phase == "complete" }
-  }
   var service: AIService? {
     guard preferences.cloudEnabled, let key, !key.isEmpty else { return nil }
     return AIService(key: key, host: preferences.host, recordingModel: preferences.recordingModel)
@@ -163,11 +181,19 @@ enum Destination: String, CaseIterable {
     })
     let environment = ProcessInfo.processInfo.environment
     isolated = libraryURL != nil || environment["WORKDAY_LIBRARY"] != nil
+    liveVoiceValidation = isolated && environment["WORKDAY_LIVE_VOICE_VALIDATION_ONLY"] == "1"
     demo = isolated && environment["WORKDAY_DEMO"] == "1"
     var prefs = isolated ? Preferences() : Preferences.load()
     if let path = libraryURL?.path ?? environment["WORKDAY_LIBRARY"] {
       prefs.libraryPath = path
       prefs.autoConnect = false
+    }
+    if liveVoiceValidation {
+      prefs.boundID = environment["WORKDAY_LIVE_VOICE_DEVICE_ID"].flatMap { UUID(uuidString: $0)?.uuidString }
+      prefs.autoSync = false
+      prefs.autoOrganize = false
+      prefs.cloudEnabled = false
+      prefs.captions.enabled = environment["WORKDAY_LIVE_VOICE_VALIDATE_CAPTIONS"] == "1"
     }
     preferences = prefs
     let store = ArchiveStore(root: URL(fileURLWithPath: prefs.libraryPath, isDirectory: true))
@@ -198,6 +224,10 @@ enum Destination: String, CaseIterable {
     card.onAudio = { [weak self] data in
       guard let self else { return }
       self.audioMeter.append(data, offset: recordingOffset)
+      if self.preferences.captions.enabled || self.liveVoiceValidation {
+        self.voices.appendLiveAudio(data, offset: recordingOffset,
+          source: VoiceRecognition.source(self.card.state.filename, fallback: "live-card"))
+      }
       self.live.append(data, recordingOffset: recordingOffset)
       self.localCaptions.append(data, recordingOffset: recordingOffset)
       recordingOffset += data.count
@@ -205,6 +235,7 @@ enum Destination: String, CaseIterable {
     card.onStreamReset = { [weak self] reason in
       guard let self else { return }
       self.audioMeter.reset()
+      self.voices.resetLiveAudio()
       if case .started = reason { recordingOffset = 0 }
       self.live.boundary(reason)
       self.localCaptions.boundary(reason)
@@ -230,7 +261,10 @@ enum Destination: String, CaseIterable {
       guard let self else { return }
       saveCaption(line, evidenceID: captionVoiceID(for: line))
     }
-    self.localCaptions.$lines.sink { [weak self] in self?.captionSelection.receiveLocal($0) }
+    self.localCaptions.$lines.sink { [weak self] lines in
+      self?.voices.observeLiveLines(lines)
+      self?.captionSelection.receiveLocal(lines)
+    }
       .store(in: &subscriptions)
     self.live.$lines.sink { [weak self] in self?.captionSelection.receiveCloud($0) }
       .store(in: &subscriptions)
@@ -264,7 +298,7 @@ enum Destination: String, CaseIterable {
   func start() {
     guard !started else { return }
     started = true
-    desktop.start(model: self)
+    if !liveVoiceValidation { desktop.start(model: self) }
     if !isolated {
       key = Credentials.load()
       hasKey = key != nil
@@ -285,6 +319,9 @@ enum Destination: String, CaseIterable {
       if !isolated {
         usb.start()
         if preferences.autoConnect { card.activate() }
+      } else if liveVoiceValidation, preferences.boundID != nil {
+        card.activate(.reconnectBound)
+        startLiveVoiceValidationReport()
       }
       scheduleProcessing()
     }
@@ -294,6 +331,7 @@ enum Destination: String, CaseIterable {
     card.autoConnect = preferences.autoConnect
     if preferences.autoSync, !manualSyncVolumes.isEmpty { manualSyncVolumes = [] }
     configureCaptions(service: service)
+    if !preferences.captions.enabled && !liveVoiceValidation { voices.resetLiveAudio() }
     if !preferences.cloudEnabled {
       queuedRecordingRetries.removeAll()
       queuedSummaryRetries.removeAll()
@@ -393,6 +431,17 @@ enum Destination: String, CaseIterable {
     if panel.runModal() == .OK { importFiles(panel.urls.map { ($0, "manual") }) }
   }
   private func attachVoices() {
+    voices.onRealtimeIdentityChanged = { [weak self] lines in
+      guard let self else { return }
+      for line in lines {
+        guard var shown = self.captionSelection.lines.first(where: { $0.id == line.id }) else { continue }
+        shown.voiceID = line.voiceID
+        shown.voicePackets = line.voicePackets
+        shown.voiceRange = line.voiceRange
+        shown.draftVoice = line.draftVoice
+        self.captionHistory.accept(shown, evidenceID: line.bubbleVoiceID)
+      }
+    }
     voiceSubscription = voices.objectWillChange.sink { [weak self] _ in
       self?.objectWillChange.send()
     }
@@ -415,6 +464,9 @@ enum Destination: String, CaseIterable {
 
   func captionSpeaker(for record: CaptionRecord) -> CaptionSpeaker {
     if localCaptions.lines.contains(where: { $0.id == record.id }) { return captionSpeaker(for: record.id) }
+    if let evidence = record.evidenceID, evidence.hasPrefix("realtime:") {
+      return voices.captionSpeaker(lineID: record.id, evidenceID: evidence)
+    }
     let local = record.localVoiceID.flatMap { voices.label($0) == nil ? nil : $0 }
     return voices.captionSpeaker(lineID: record.id, evidenceID: local ?? record.evidenceID)
   }
@@ -450,6 +502,8 @@ enum Destination: String, CaseIterable {
     return captionVoiceID(for: local)
   }
   private func localFeedbackID(_ line: LiveLine) -> String? {
+    let shown = voices.presentationLine(line)
+    if let id = shown.bubbleVoiceID, id.hasPrefix("realtime:"), voices.hasLiveVoice(id) { return id }
     if let id = line.voiceID { return id }
     guard let id = line.draftVoice?.id, voices.hasLiveVoice(id) else { return nil }
     return id
@@ -534,11 +588,17 @@ enum Destination: String, CaseIterable {
         }
     }
     guard !pending.isEmpty || !summaryDays.isEmpty || hasRetries else { return }
+    scheduledRecordingIDs = Set(pending.map(\.id))
+    scheduledSummaryDays = includedDays
+    automaticProcessingScope = runScope ? scope : nil
     processingTask = Task {
       defer {
         processingID = nil
         processingLabel = nil
         processingTask = nil
+        scheduledRecordingIDs.removeAll()
+        scheduledSummaryDays.removeAll()
+        automaticProcessingScope = nil
         // Keep a scoped retry scoped, including any follow-up caused by a changed fingerprint.
         scheduleProcessing(force: force, scope: scope)
       }
@@ -555,11 +615,13 @@ enum Destination: String, CaseIterable {
             queuedRecordingRetries.removeFirst()
             guard let recording = recordings.first(where: { $0.id == id }) else { continue }
             daysToSummarize.formUnion(WorkdayTimeline.days(recording))
+            scheduledSummaryDays.formUnion(WorkdayTimeline.days(recording))
             next = recording
           } else {
             next = remaining.popFirst()
           }
           if let recording = next {
+            scheduledRecordingIDs.remove(recording.id)
             guard documents[recording.id]?.phase != "complete", attempted.insert(recording.id).inserted
             else { continue }
             await processRecording(recording, using: service)
@@ -569,6 +631,7 @@ enum Destination: String, CaseIterable {
           day = nextDay
         }
         daysToSummarize.remove(day)
+        scheduledSummaryDays.remove(day)
         let version = summaryVersion(day)
         let items = recordings.filter {
           WorkdayTimeline.days($0).contains(day) && documents[$0.id]?.phase == "complete"
@@ -579,7 +642,7 @@ enum Destination: String, CaseIterable {
         attempted.insert("day:" + version)
         processingSummaryDay = day
         defer { processingSummaryDay = nil }
-        processingLabel = "正在整理全天事项"
+        processingLabel = "正在生成当天概述"
         processingID = items.first?.id
         do {
           var summary = try await service.summarize(
@@ -589,6 +652,7 @@ enum Destination: String, CaseIterable {
           guard version == summaryVersion(day) else {
             attempted.remove("day:" + version)
             daysToSummarize.insert(day)
+            scheduledSummaryDays.insert(day)
             continue
           }
           summary.inputFingerprint = version
@@ -608,7 +672,7 @@ enum Destination: String, CaseIterable {
   }
   private func processRecording(_ recording: Recording, using service: any InferenceServing) async {
     processingID = recording.id
-    processingLabel = "正在整理 \(recording.originalName)"
+    processingLabel = "正在处理录音 \(recording.originalName)"
     if let previous = documents[recording.id]?.error,
       error == "\(previous)\n录音：\(recording.originalName)"
     {
@@ -769,16 +833,8 @@ enum Destination: String, CaseIterable {
     selectedDetail = .conversation(clip.id)
   }
   func dayStatus(_ day: String) -> String {
-    let items = recordings.filter { WorkdayTimeline.days($0).contains(day) }
-    if items.contains(where: { $0.id == processingID }) { return "整理中" }
-    if summaryErrors[day] != nil || items.contains(where: { documents[$0.id]?.error != nil }) {
-      return "需重试"
-    }
-    if items.isEmpty { return "尚无本地录音" }
-    if items.allSatisfy({ documents[$0.id]?.phase == "complete" }) {
-      return summaryIsCurrent(day) ? "已整理" : "摘要待更新"
-    }
-    return "已保存"
+    if workspace(for: day).recordings.isEmpty { return "尚无本地录音" }
+    return dayOverviewState(for: day).message ?? "概述已生成"
   }
   func recording(for clip: Conversation) -> Recording? {
     recordings.first { $0.id == clip.recordingID }
@@ -975,6 +1031,8 @@ enum Destination: String, CaseIterable {
     } catch { self.error = error.localizedDescription }
   }
   func shutdown() async {
+    liveValidationTask?.cancel()
+    liveValidationTask = nil
     quitting = true
     captionHistory.configureReview(nil, reviewer: nil)
     queuedRecordingRetries.removeAll()

@@ -45,6 +45,7 @@ struct VoiceLabel: Equatable {
   private var captionSamples: [String: String] = [:]
   private var ownerProfiles: [Int64: [Float]] = [:]
   private var individualOwnerVoices: [[Float]] = []
+  private var liveOwnerVoices: [[Float]] = []
   private var namedProfiles: [String: [[Float]]] = [:]
   private var negativeVoices: [[Float]] = []
   private var negativeOrigins: [String: String] = [:]
@@ -96,6 +97,11 @@ struct VoiceLabel: Equatable {
       CREATE TABLE IF NOT EXISTS non_owner_sample_audio(
         evidence TEXT PRIMARY KEY REFERENCES non_owner_samples(evidence) ON DELETE CASCADE, packets BLOB NOT NULL);
       CREATE TABLE IF NOT EXISTS credited_live_drafts(turn TEXT PRIMARY KEY REFERENCES turns(id) ON DELETE CASCADE);
+      CREATE TABLE IF NOT EXISTS realtime_evidence(
+        turn TEXT PRIMARY KEY REFERENCES turns(id), generation TEXT NOT NULL,
+        start_frame INTEGER NOT NULL, end_frame INTEGER NOT NULL, packet_start_frame INTEGER NOT NULL,
+        quality BLOB NOT NULL, status TEXT NOT NULL, reason TEXT NOT NULL, track INTEGER NOT NULL,
+        owner_score REAL NOT NULL, negative_score REAL NOT NULL, packets BLOB NOT NULL, pcm BLOB);
       """)
     try refresh()
   }
@@ -197,6 +203,7 @@ struct VoiceLabel: Equatable {
     sampleGroups.removeAll()
     captionSamples.removeAll()
     individualOwnerVoices.removeAll()
+    liveOwnerVoices.removeAll()
     var sums: [Int64: [Float]] = [:]
     try query("""
       SELECT o.turn,o.caption,t.speaker,t.voice,s.name,s.rejected FROM owner_samples o
@@ -204,6 +211,7 @@ struct VoiceLabel: Equatable {
       ORDER BY o.turn
       """) { stmt in
       guard let voice = vector(stmt, 3) else { return }
+      liveOwnerVoices.append(voice)
       let id = String(cString: sqlite3_column_text(stmt, 0))
       let group = sqlite3_column_int64(stmt, 2)
       if let caption = sqlite3_column_text(stmt, 1) { captionSamples[String(cString: caption)] = id }
@@ -359,6 +367,7 @@ struct VoiceLabel: Equatable {
       return VoiceLabel(title: "我", canConfirm: false, isMine: true, group: group == 0 ? nil : group, sampleID: sample)
     }
     if id.hasPrefix("caption:") { return .forUtterance() }
+    if let realtime = try realtimeLabel(id) { return realtime }
     try query(
       """
       SELECT t.voice,s.id,s.name,s.rejected FROM turns t LEFT JOIN speakers s ON t.speaker=s.id WHERE t.id=?
@@ -395,6 +404,67 @@ struct VoiceLabel: Equatable {
     }
     if id.hasPrefix("file:"), result?.isMine != true {
       result = try archiveLabel(id, base: result)
+    }
+    return result
+  }
+
+  /// Automatic unknown clusters are not identity labels. Only explicitly
+  /// confirmed owner/non-owner or named profiles compete in this live path.
+  /// Legacy archive matching deliberately retains its existing rules.
+  func assessLive(_ voice: [Float]) throws -> LiveOwnerAssessment {
+    try refreshExternalChanges()
+    let owner = (liveOwnerVoices + Array(ownerProfiles.values))
+      .map { SpeakerEncoder.similarity($0, voice) }.max() ?? -1
+    let negatives = negativeVoices + namedProfiles.values.flatMap { $0 }
+    let negative = negatives.map { SpeakerEncoder.similarity($0, voice) }.max() ?? -1
+    return LiveOwnerAssessment(ownerScore: owner, negativeScore: negative)
+  }
+
+  func persistRealtimeEvidence(id: String, source: String, evidence: LiveVoiceEvidence,
+                               decision: LiveIdentityDecision, savePCM: Bool = false) throws {
+    guard let voice = evidence.voice, evidence.quality.usableForIdentity else { return }
+    try record(id: id, source: source, live: true,
+               seconds: Double(evidence.range.count) / 16_000, voice: voice, countDuration: false)
+    let quality = try JSONEncoder().encode(evidence.quality)
+    try query("""
+      INSERT INTO realtime_evidence(turn,generation,start_frame,end_frame,packet_start_frame,quality,
+        status,reason,track,owner_score,negative_score,packets,pcm) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(turn) DO UPDATE SET status=excluded.status,reason=excluded.reason,
+        owner_score=excluded.owner_score,negative_score=excluded.negative_score,pcm=coalesce(realtime_evidence.pcm,excluded.pcm)
+      """, [.text(id), .text(evidence.generation.uuidString), .int(Int64(evidence.range.lowerBound)),
+             .int(Int64(evidence.range.upperBound)), .int(Int64(evidence.packetStartFrame)), .packets(quality),
+             .text(decision.status.rawValue), .text(decision.reason.rawValue), .int(Int64(decision.track)),
+             .seconds(Double(decision.ownerScore)), .seconds(Double(decision.negativeScore)),
+             .packets(evidence.packets), savePCM ? .vector(evidence.pcm) : .null])
+  }
+
+  func liveEvidenceCount() throws -> Int {
+    var count = 0
+    try query("SELECT count(*) FROM realtime_evidence") { count = Int(sqlite3_column_int($0, 0)) }
+    return count
+  }
+
+  func liveSamplePCM(_ id: String) throws -> [Float]? {
+    var samples: [Float]?
+    try query("SELECT pcm FROM realtime_evidence WHERE turn=?", [.text(id)]) { samples = vector($0, 0) }
+    return samples
+  }
+
+  func sampleConsistency() throws -> [Float?] {
+    try refreshExternalChanges()
+    return SpeakerProfileAudit.consistency(liveOwnerVoices)
+  }
+
+  private func realtimeLabel(_ id: String) throws -> VoiceLabel? {
+    var result: VoiceLabel?
+    try query("SELECT r.status,t.voice FROM realtime_evidence r JOIN turns t ON t.id=r.turn WHERE r.turn=?", [.text(id)]) { stmt in
+      let status = String(cString: sqlite3_column_text(stmt, 0))
+      if status == LiveIdentityStatus.owner.rawValue, let voice = vector(stmt, 1),
+         (try? assessLive(voice).reason) == .matched {
+        result = .forUtterance(mine: true)
+      } else {
+        result = .forUtterance()
+      }
     }
     return result
   }
@@ -471,7 +541,8 @@ struct VoiceLabel: Equatable {
     try query("""
       SELECT packets FROM owner_sample_audio WHERE evidence=?
       UNION ALL SELECT packets FROM non_owner_sample_audio WHERE evidence=?
-      """, [.text(evidence), .text(evidence)]) { stmt in
+      UNION ALL SELECT packets FROM realtime_evidence WHERE turn=?
+      """, [.text(evidence), .text(evidence), .text(evidence)]) { stmt in
       if let blob = sqlite3_column_blob(stmt, 0) {
         packets = Data(bytes: blob, count: Int(sqlite3_column_bytes(stmt, 0)))
       }
@@ -522,6 +593,18 @@ struct VoiceLabel: Equatable {
   func clearNegativeSamples() throws {
     try exec("DELETE FROM non_owner_samples")
     try loadNegativeSamples()
+  }
+  func clearSamples() throws {
+    try transaction {
+      // Enrollment can be removed without undoing the user's historical labels.
+      try exec("""
+        INSERT OR IGNORE INTO utterance_marks(turn,mine)
+          SELECT coalesce(caption,turn),1 FROM owner_samples;
+        DELETE FROM owner_samples;
+        DELETE FROM non_owner_samples;
+        """)
+    }
+    try refresh()
   }
   func reject(_ group: Int64) throws {
     try transaction {

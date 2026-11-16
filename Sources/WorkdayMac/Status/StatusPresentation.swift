@@ -8,6 +8,13 @@ enum StatusAction: Equatable {
   case originals, live, processing, pauseProcessing, recognitionSettings, captionSettings, retryCaptions
   case retryImport, device, summary(String)
 
+  var isSecondary: Bool {
+    switch self {
+    case .originals, .live, .device, .pauseProcessing: return true
+    default: return false
+    }
+  }
+
   var title: String {
     switch self {
     case .sync(let action): return action.rawValue
@@ -17,14 +24,14 @@ enum StatusAction: Equatable {
     case .bluetoothSettings: return "打开系统设置…"
     case .originals: return "查看原始录音"
     case .live: return "查看实时字幕"
-    case .processing: return "继续整理"
-    case .pauseProcessing: return "暂停整理"
-    case .recognitionSettings: return "配置文字整理"
+    case .processing: return "开始处理"
+    case .pauseProcessing: return "暂停后台处理"
+    case .recognitionSettings: return "设置语音识别"
     case .captionSettings: return "字幕设置"
     case .retryCaptions: return "重试本机识别"
     case .retryImport: return "重试导入"
     case .device: return "查看录音卡"
-    case .summary: return "重试这一天"
+    case .summary: return "重新生成概述"
     }
   }
 }
@@ -37,6 +44,7 @@ struct StatusActivity: Identifiable {
   var state: State = .information
   var action: StatusAction?
   var error: String?
+  var actionLabel: String? = nil
   var isWorking: Bool { state == .working }
 }
 
@@ -121,28 +129,39 @@ extension AppModel {
     let pendingSummaries = days.filter { day in
       !summaryIsCurrent(day) && recordings.contains { WorkdayTimeline.days($0).contains(day) && documents[$0.id]?.phase == "complete" }
     }
-    if processingPaused && (!pending.isEmpty || !pendingSummaries.isEmpty) {
-      activities.append(.init(id: "processing", title: "文字整理已暂停", detail: "原件与已完成的文字已保留。",
-                              state: .waiting, action: .processing))
+    if processingPaused && processingIsRunning {
+      activities.append(.init(id: "processing", title: "正在暂停后台处理…", detail: "当前任务停止后可手动继续。", state: .working))
+    } else if processingPaused && (!pending.isEmpty || !pendingSummaries.isEmpty) {
+      activities.append(.init(id: "processing", title: "录音处理已暂停，需要手动继续", detail: "原件与已完成的文字已保留。",
+                              state: .needsAction, action: .processing, actionLabel: "继续处理"))
     } else if let id = processingID {
-      let name = recordings.first { $0.id == id }?.originalName ?? "已保存的录音"
-      let detail = processingSummaryDay.map { "正在处理 \(WorkspaceDate.title($0))，原件已保存在 Mac。" }
-        ?? "\(name) · 原件已保存在 Mac。"
-      let title = processingSummaryDay != nil ? "正在整理全天事项"
-        : documents[id].flatMap { $0.phase == "pending" ? nil : $0.label } ?? "正在准备文字整理"
+      let record = recordings.first { $0.id == id }
+      let detail = processingSummaryDay.map { "正在生成 \(WorkspaceDate.title($0))的概述，无需重复启动。" }
+        ?? "\(record?.originalName ?? "已保存的录音") · 无需重复启动。"
+      let title: String
+      if processingSummaryDay != nil { title = "正在生成当天概述" }
+      else if let record, case .working(let stage) = recordingProcessingState(record) { title = stage }
+      else { title = "正在准备转写录音" }
       activities.append(.init(id: "processing", title: title, detail: detail,
                               state: .working, action: .pauseProcessing))
+    } else if processingIsRunning {
+      activities.append(.init(id: "processing", title: "后台任务已排队，将自动开始", detail: "无需重复启动。", state: .waiting))
     } else if !failed.isEmpty {
-      activities.append(.init(id: "processing", title: "\(failed.count) 段录音文字整理待重试",
-                              detail: "原件已保存在 Mac，可继续回听；重试会保留已完成的进度。",
-                              state: .needsAction, action: .processing, error: failed.first.flatMap { documents[$0.id]?.error }))
+      activities.append(.init(id: "processing", title: "\(failed.count) 段录音处理失败，需要重试",
+                              detail: "录音文件已保存，可继续回听。点击重试，从已完成的进度继续。",
+                              state: .needsAction, action: processingIsAvailable ? .processing : .recognitionSettings,
+                              error: failed.first.flatMap { documents[$0.id]?.error },
+                              actionLabel: processingIsAvailable ? "重试处理" : nil))
     } else if !pending.isEmpty || !pendingSummaries.isEmpty {
-      let title = !pending.isEmpty ? "\(pending.count) 段录音待整理" : "全天事项待更新"
-      activities.append(.init(id: "processing", title: title, detail: "原件已保存，文字与事项尚未全部整理完成。",
-                              state: .waiting, action: processingIsAvailable ? .processing : .recognitionSettings))
+      let title = !pending.isEmpty ? "\(pending.count) 段录音需要手动处理" : "概述尚未生成或更新，需要手动启动"
+      let detail = processingIsAvailable
+        ? "录音文件已保存。点击「开始处理」生成文字、事项与概述。"
+        : "录音文件已保存。请先完成语音识别设置，再开始处理。"
+      activities.append(.init(id: "processing", title: title, detail: detail,
+                              state: .needsAction, action: processingIsAvailable ? .processing : .recognitionSettings))
     }
     if !failed.isEmpty && (processingID != nil || processingPaused) {
-      activities.append(.init(id: "processing-failures", title: "\(failed.count) 段录音文字整理待重试",
+      activities.append(.init(id: "processing-failures", title: "\(failed.count) 段录音处理失败",
                               detail: "当前任务不受影响；可在原始录音中单独重试失败项。",
                               state: .needsAction, action: .originals,
                               error: failed.first.flatMap { documents[$0.id]?.error }))
@@ -150,7 +169,7 @@ extension AppModel {
     for day in summaryErrors.keys.sorted(by: >) where processingSummaryDay != day {
       let queued = queuedSummaryRetries.contains(day)
       activities.append(.init(id: "summary:" + day,
-                              title: "\(WorkspaceDate.title(day)) 总结" + (queued ? "已排队" : "待重试"),
+                              title: "\(WorkspaceDate.title(day)) 概述" + (queued ? "已排队" : "待重试"),
                               detail: queued ? "当前任务结束后继续；原件与已完成的文字已保留。" : "原件与已完成的文字已保留。",
                               state: queued ? .waiting : .needsAction,
                               action: queued ? nil : .summary(day), error: queued ? nil : summaryErrors[day]))

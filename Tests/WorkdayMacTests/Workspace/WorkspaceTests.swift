@@ -189,19 +189,18 @@ final class WorkspaceTests: XCTestCase {
     let host = NSHostingController(rootView: row)
     window.contentViewController = host
     window.setContentSize(NSSize(width: 640, height: 240))
+    window.setFrameOrigin(NSPoint(x: -16000, y: -16000))
+    window.orderBack(nil)
+    try await Task.sleep(for: .milliseconds(120))
     host.view.layoutSubtreeIfNeeded()
-    func buttons(in view: NSView) -> [NSButton] {
-      if let button = view as? NSButton { return [button] }
-      return view.subviews.flatMap { buttons(in: $0) }
-    }
-    let rowButtons = buttons(in: host.view)
-    XCTAssertEqual(rowButtons.count, 1)
-    let action = try XCTUnwrap(rowButtons.first)
-    XCTAssertTrue(action.isEnabled)
+    let action = try XCTUnwrap(nativeActionButtons(in: host.view).first { $0.title == "重试处理" })
+    XCTAssertTrue(action.isAccessibilityEnabled())
+    XCTAssertEqual(action.accessibilityRole(), .button)
     action.performClick(nil)
     try await Task.sleep(for: .milliseconds(50))
     host.view.layoutSubtreeIfNeeded()
-    XCTAssertFalse(try XCTUnwrap(buttons(in: host.view).first).isEnabled)
+    XCTAssertFalse(nativeActionButtons(in: host.view).contains { $0.title == "重试处理" },
+      "入队后应显示只读状态，不应保留重复提交按钮")
     model.retryProcessing(scope: .recording(retry.id))
     XCTAssertEqual(model.queuedRecordingRetries, [retry.id])
     XCTAssertEqual(model.error, previousError)
@@ -255,20 +254,16 @@ final class WorkspaceTests: XCTestCase {
     let host = NSHostingController(rootView: DaySummaryView(model: model))
     window.contentViewController = host
     window.setContentSize(NSSize(width: 500, height: 220))
+    window.setFrameOrigin(NSPoint(x: -16000, y: -16000))
+    window.orderBack(nil)
+    try await Task.sleep(for: .milliseconds(120))
     host.view.layoutSubtreeIfNeeded()
     XCTAssertEqual(model.selectedDay, day)
-    func buttons(in view: NSView) -> [NSButton] {
-      if let button = view as? NSButton { return [button] }
-      return view.subviews.flatMap { buttons(in: $0) }
-    }
-    let actions = buttons(in: host.view)
-    XCTAssertFalse(actions.isEmpty)
-    // SwiftUI hosts link labels in virtual accessibility elements; NSButton titles are empty.
-    // Expanding the saved summary must remain harmless before the recovery action is invoked.
-    for action in actions where action.isEnabled {
-      action.performClick(nil)
-      if model.queuedSummaryRetries.contains(day) { break }
-    }
+    let action = try XCTUnwrap(nativeActionButtons(in: host.view).first { $0.title == "重试概述" })
+    XCTAssertTrue(action.isAccessibilityEnabled())
+    XCTAssertEqual(action.accessibilityRole(), .button)
+    action.performClick(nil)
+    try await Task.sleep(for: .milliseconds(50))
     XCTAssertEqual(model.queuedSummaryRetries, [day])
     model.retryProcessing(scope: .summary(day))
     XCTAssertEqual(model.queuedSummaryRetries, [day])

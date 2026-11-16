@@ -34,7 +34,8 @@ let package = Package(
       ]),
     .target(
       name: "WorkdayMac",
-      dependencies: ["WorkdayCore", "QS668Core"]),
+      dependencies: ["WorkdayCore", "QS668Core"],
+      resources: [.copy("Resources/DockArtwork")]),
     .executableTarget(
       name: "WorkdayLauncher", dependencies: ["WorkdayMac"], path: "WorkRecorder",
       exclude: ["Assets.xcassets"]),

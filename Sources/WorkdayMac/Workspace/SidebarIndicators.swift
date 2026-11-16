@@ -13,22 +13,6 @@ extension AppModel {
   }
 }
 
-struct DaySidebarIndicator: View {
-  let state: DaySidebarState
-  var body: some View {
-    Group {
-      switch state {
-      case .none: Color.clear
-      case .updated: Circle().fill(Palette.accent).frame(width: 6, height: 6)
-      case .working: ProgressView().controlSize(.mini)
-      case .failed:
-        Image(systemName: "exclamationmark.circle").font(.system(size: 11)).foregroundStyle(
-          Palette.amber)
-      }
-    }.frame(width: 20, height: 18).accessibilityHidden(true)
-  }
-}
-
 struct PendingSyncBadge: View {
   let model: AppModel
   var body: some View {

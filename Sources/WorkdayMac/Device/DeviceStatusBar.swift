@@ -68,7 +68,7 @@ struct DeviceStatusBar: View {
     let charging = model.card.state.charging
     let level = min(100, max(0, (battery + 12) / 25 * 25))
     return Label(
-      charging ? "充电中" : "电量 \(battery)%",
+      charging ? "充电中" : "\(battery)%",
       systemImage: "battery.\(level)percent"
     ).labelStyle(.titleAndIcon)
       .monospacedDigit().foregroundStyle(battery <= 10 ? Palette.amber : Palette.muted)
@@ -81,11 +81,16 @@ struct DeviceStatusBar: View {
     } label: {
       HStack(spacing: 5) {
         Image(systemName: presentation.attention.isEmpty ? "list.bullet" : "exclamationmark.circle")
-        Text("Mac · " + presentation.summary).lineLimit(1)
+          .overlay(alignment: .topTrailing) {
+            if presentation.attention.isEmpty && presentation.activities.contains(where: \.isWorking) {
+              Circle().fill(Palette.accent).frame(width: 5, height: 5).offset(x: 3, y: -2)
+            }
+          }
         Image(systemName: "chevron.down").font(.system(size: 9))
       }.foregroundStyle(presentation.attention.isEmpty ? Palette.muted : Palette.amber)
-    }.buttonStyle(.plain).frame(width: 190, alignment: .trailing)
-      .help("Mac · " + presentation.summary)
+    }.buttonStyle(.plain).frame(width: 35, height: 24, alignment: .trailing)
+      .help("后台任务：" + presentation.summary)
+      .accessibilityLabel("后台任务：" + presentation.summary)
       .accessibilityIdentifier("workspace-app-status")
       .popover(isPresented: $showsActivity) {
         ScrollView { AppActivityList(model: model, desktop: desktop).padding(18) }

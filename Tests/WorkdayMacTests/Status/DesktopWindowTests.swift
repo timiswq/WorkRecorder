@@ -7,6 +7,19 @@ import XCTest
 @testable import WorkdayMac
 
 final class DesktopWindowTests: XCTestCase {
+  @MainActor func testMenuPanelCannotCollapseWhenTheStatusWindowProposesMinimalHeight() {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    let host = NSHostingController(rootView: MenuBarPanel(model: model, desktop: model.desktop))
+    for proposedHeight in [0.0, 1.0, 10.0, 650.0] {
+      let size = host.sizeThatFits(in: NSSize(width: 340, height: proposedHeight))
+      XCTAssertEqual(size.width, 340, accuracy: 1)
+      XCTAssertGreaterThanOrEqual(size.height, 250,
+        "打开菜单时至少应能显示标题、设备状态和操作入口，不能压成白条")
+      XCTAssertLessThanOrEqual(size.height, 650)
+    }
+  }
+
   @MainActor func testFullScreenQueriesFollowCaptionVisibilityAndReuseRecentResults() throws {
     _ = NSApplication.shared
     guard NSScreen.screens.first != nil else { throw XCTSkip("需要显示器以验证字幕所在屏幕") }
@@ -463,7 +476,7 @@ final class DesktopWindowTests: XCTestCase {
         rootView: MenuBarPanel(model: model, desktop: model.desktop)
           .environment(\.colorScheme, scheme))
       menu.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
-      menu.setFrameSize(NSSize(width: 320, height: menu.fittingSize.height))
+      menu.setFrameSize(NSSize(width: 340, height: menu.fittingSize.height))
       try save(menu, named: "menu-\(name)")
       let settings = NSHostingView(
         rootView: DesktopCaptionSettings(model: model, desktop: model.desktop)
@@ -568,7 +581,14 @@ final class DesktopWindowTests: XCTestCase {
       if NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) == window.windowNumber { return }
       try await Task.sleep(for: .milliseconds(10))
     }
-    XCTAssertEqual(NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0), window.windowNumber,
+    let hit = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0)
+    if hit != window.windowNumber,
+       let info = (CGWindowListCopyWindowInfo(.optionIncludingWindow, CGWindowID(hit)) as? [[String: Any]])?.first,
+       info[kCGWindowOwnerName as String] as? String == "Window Server",
+       let level = info[kCGWindowLayer as String] as? Int, level >= Int(CGShieldingWindowLevel()) {
+      throw XCTSkip("Window Server 系统遮罩覆盖点击位置；后台测试不关闭遮罩或抢占前台。窗口命中验收待无遮挡桌面验证。")
+    }
+    XCTAssertEqual(hit, window.windowNumber,
                    "鼠标点击应由对应气泡或身份按钮接收", file: file, line: line)
   }
 
@@ -597,7 +617,7 @@ final class DesktopWindowTests: XCTestCase {
   @MainActor private func menuSnapshot(_ model: AppModel) throws -> Data {
     model.desktop.refresh()
     let host = NSHostingView(rootView: MenuBarPanel(model: model, desktop: model.desktop))
-    host.setFrameSize(NSSize(width: 320, height: host.fittingSize.height))
+    host.setFrameSize(NSSize(width: 340, height: host.fittingSize.height))
     return try png(host)
   }
 

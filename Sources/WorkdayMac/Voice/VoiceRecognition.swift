@@ -23,10 +23,19 @@ struct CaptionSpeaker {
   private let usableLiveVoices = NSCache<NSString, NSNumber>()
   private(set) var captionIdentityRevision = 0
   private var stopped = false
+  var onRealtimeIdentityChanged: (([LiveLine]) -> Void)?
+  private lazy var realtime = RealtimeVoiceRecognition(database: { [unowned self] in try self.db() },
+    changed: { [weak self] lines in
+      guard let self else { return }
+      self.captionIdentityRevision += 1
+      self.objectWillChange.send()
+      self.onRealtimeIdentityChanged?(lines)
+    }, failure: { [weak self] in self?.report($0) })
   @Published private(set) var error: String?
   var confirmed: Bool { library?.confirmed == true }
   var sampleCount: Int { library?.sampleCount ?? 0 }
   var negativeSampleCount: Int { library?.negativeSampleCount ?? 0 }
+  var canClearSamples: Bool { sampleCount > 0 || negativeSampleCount > 0 || !pendingCaptions.isEmpty }
 
   init(root: URL) {
     self.root = root
@@ -53,7 +62,11 @@ struct CaptionSpeaker {
   }
   func label(_ id: String?) -> VoiceLabel? {
     guard let id else { return nil }
-    if let library { return try? library.label(id) }
+    if let library {
+      let saved = try? library.label(id)
+      if saved?.sampleID != nil || saved?.isNegativeSample == true { return saved }
+      return realtime.label(id) ?? saved
+    }
     return id.hasPrefix("caption:") ? .forUtterance() : nil
   }
   static func captionMark(_ lineID: String, evidence: String?) -> String {
@@ -73,6 +86,7 @@ struct CaptionSpeaker {
   }
   func hasLiveVoice(_ id: String?) -> Bool {
     guard let id else { return false }
+    if id.hasPrefix("realtime:") { return realtime.hasVoice(id) || (try? db().hasLiveVoice(id)) == true }
     if let known = usableLiveVoices.object(forKey: id as NSString) { return known.boolValue }
     let usable = (try? db().hasLiveVoice(id)) == true
     usableLiveVoices.setObject(NSNumber(value: usable), forKey: id as NSString)
@@ -81,15 +95,30 @@ struct CaptionSpeaker {
 
   func markBubble(lineID: String, evidence: String, packets: Data, mine: Bool) {
     change { db in
-      try db.setCaptionMark(Self.captionMark(lineID, evidence: evidence), mine: mine, evidence: evidence, packets: packets)
+      var canEnroll = true
+      if evidence.hasPrefix("realtime:") {
+        canEnroll = try realtime.persistFeedback(id: evidence, packets: packets, database: db)
+      }
+      try db.setCaptionMark(Self.captionMark(lineID, evidence: evidence), mine: mine,
+                            evidence: canEnroll ? evidence : nil, packets: canEnroll ? packets : nil)
       pendingCaptions[lineID] = nil
     }
   }
 
   private func profileChanged() {
+    realtime.profileChanged()
     captionIdentityRevision += 1
     objectWillChange.send()
   }
+  func appendLiveAudio(_ data: Data, offset: Int, source: String) {
+    realtime.append(data, offset: offset, source: source)
+  }
+  func resetLiveAudio() { realtime.reset() }
+  func observeLiveLines(_ lines: [LiveLine]) { realtime.observe(lines) }
+  func presentationLine(_ line: LiveLine) -> LiveLine { realtime.presentation(line) }
+  func receiveLiveEvidence(_ evidence: LiveVoiceEvidence) { realtime.receive(evidence) }
+  var liveWindowsProcessed: Int { realtime.windowsProcessed }
+  var inconsistentSampleCount: Int { (try? db().sampleConsistency().compactMap { $0 }.filter { $0 < 0.50 }.count) ?? 0 }
   func confirm(_ id: String, captionLineID: String? = nil) {
     change { db in
       let utterance = captionLineID.map { "caption:" + $0 }
@@ -101,10 +130,15 @@ struct CaptionSpeaker {
   }
   func setCaptionMark(lineID: String, mine: Bool, evidence: String?) {
     change { db in
+      let packets = evidence.flatMap { $0.hasPrefix("realtime:") ? realtime.feedbackPackets($0) : nil }
+      var canEnroll = true
+      if let evidence, let packets {
+        canEnroll = try realtime.persistFeedback(id: evidence, packets: packets, database: db)
+      }
       let mark = Self.captionMark(lineID, evidence: evidence)
-      try db.setCaptionMark(mark, mine: mine, evidence: evidence)
-      pendingCaptions[lineID] = try db.label(mark) == .forUtterance(mine: mine)
-        ? (mine ? .mine : .notMine) : nil
+      try db.setCaptionMark(mark, mine: mine, evidence: canEnroll ? evidence : nil, packets: canEnroll ? packets : nil)
+      let isPending = try db.label(mark) == .forUtterance(mine: mine)
+      pendingCaptions[lineID] = evidence?.hasPrefix("realtime:") != true && isPending ? (mine ? .mine : .notMine) : nil
     }
   }
   /// A tap on a draft can precede both the final timestamps and local inference.
@@ -170,6 +204,12 @@ struct CaptionSpeaker {
     change {
       try $0.clearNegativeSamples()
       pendingCaptions = pendingCaptions.filter { $0.value != .notMine }
+    }
+  }
+  func clearSamples() {
+    change {
+      try $0.clearSamples()
+      pendingCaptions.removeAll()
     }
   }
   private func change(_ perform: (VoiceLibrary) throws -> Void) {
@@ -295,9 +335,11 @@ struct CaptionSpeaker {
     let tasks = Array(liveTasks.values)
     await archiveTask?.value
     for task in tasks { await task.value }
+    if stopped { await realtime.finish() }
   }
   func stop() {
     stopped = true
+    realtime.stop()
     archiveTask?.cancel()
     archives = [:]
     for task in liveTasks.values { task.cancel() }

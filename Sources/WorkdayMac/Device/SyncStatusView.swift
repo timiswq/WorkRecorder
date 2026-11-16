@@ -111,11 +111,13 @@ struct SyncStatusView: View {
   var body: some View {
     let state = model.cardSync
     HStack(alignment: .top, spacing: 12) {
-      Image(systemName: state.hasSavedOriginals ? "checkmark.circle" : "square.and.arrow.down")
-        .font(.system(size: 17, weight: .medium)).foregroundStyle(Palette.accent)
-        .frame(width: 32, height: 32)
-        .background(Palette.selected, in: RoundedRectangle(cornerRadius: 7))
-        .accessibilityHidden(true)
+      Group {
+        if state.isWorking { ProgressView().controlSize(.small).accessibilityLabel(state.title) }
+        else {
+          Image(systemName: state.hasSavedOriginals ? "checkmark.circle" : state.action != nil ? "hand.tap" : "cable.connector")
+            .font(.system(size: 17, weight: .medium)).foregroundStyle(Palette.muted).accessibilityHidden(true)
+        }
+      }.frame(width: 32, height: 32)
 
       VStack(alignment: .leading, spacing: 6) {
         Text("录音保存到 Mac").font(.caption).foregroundStyle(Palette.muted)
@@ -134,7 +136,7 @@ struct SyncStatusView: View {
           } else if state.hasSavedOriginals && showsOriginalsAction {
             Button("查看原始录音") { model.showOriginals() }.buttonStyle(.borderedProminent)
           }
-          Button("同步详情") { showsDetails.toggle() }.buttonStyle(.link)
+          Button("同步详情") { showsDetails.toggle() }.buttonStyle(.bordered)
             .popover(isPresented: $showsDetails) { details }
         }.padding(.top, 5)
       }

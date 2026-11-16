@@ -13,7 +13,7 @@ enum DaySentenceTime {
 
 private enum OrganizationAction: String {
   case create = "新建事项"
-  case append = "补进已有事项"
+  case append = "加入已有事项"
 }
 
 struct RawConversationInspector: View {
@@ -22,80 +22,58 @@ struct RawConversationInspector: View {
   let compact: Bool
   let openSource: (String, String?) -> Void
   let edit: ([Conversation]) -> Void
-  @State private var chosen: Set<String>
-
-  init(
-    model: AppModel, entry: ActivityEntry, compact: Bool,
-    openSource: @escaping (String, String?) -> Void,
-    edit: @escaping ([Conversation]) -> Void
-  ) {
-    self.model = model
-    self.entry = entry
-    self.compact = compact
-    self.openSource = openSource
-    self.edit = edit
-    _chosen = State(initialValue: Set(entry.clips.map(\.id)))
-  }
+  @State private var selecting = false
+  @State private var chosen = Set<String>()
 
   var body: some View {
     let selected = entry.clips.filter { chosen.contains($0.id) }
-    VStack(alignment: .leading, spacing: 0) {
+    VStack(spacing: 0) {
       ScrollView {
-        LazyVStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 18) {
           if compact { Button("‹ 返回全天事项") { model.selectedDetail = nil }.buttonStyle(.link) }
-          HStack(alignment: .firstTextBaseline) {
-            Text(entry.timeLabel).font(.title2.weight(.semibold).monospacedDigit())
-            Spacer(minLength: 8)
-            Label("未整理对话", systemImage: "circle").font(.caption).foregroundStyle(Palette.amber)
-          }
-          if let first = entry.clips.first, let last = entry.clips.max(by: { $0.end < $1.end }) {
-            ConversationAudioPreview(model: model, first: first, last: last)
-            Button("查看完整原文") { openSource(first.recordingID, first.lineIDs.first) }.buttonStyle(
-              .link)
+          HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 7) {
+              Text("对话片段").font(.system(size: 23, weight: .semibold))
+              Text(entry.timeLabel).font(.callout.monospacedDigit()).foregroundStyle(Palette.muted)
+            }
+            Spacer(minLength: 12)
+            if let first = entry.clips.first, let last = entry.clips.last {
+              let playing = model.player.playing && model.player.selectionID == model.excerptID(first, through: last)
+              Button { model.playExcerpt(first, through: last) } label: {
+                Label(playing ? "暂停这段" : "播放这段", systemImage: playing ? "pause.circle.fill" : "play.circle.fill")
+              }.buttonStyle(.plain).foregroundStyle(Palette.accent)
+            }
+            Menu {
+              Button("选择原话…") { selecting = true; chosen = Set(entry.clips.map(\.id)) }
+              if let first = entry.clips.first {
+                Button("查看完整原文") { openSource(first.recordingID, first.lineIDs.first) }
+              }
+            } label: { Image(systemName: "ellipsis") }
+              .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("对话操作")
           }
           Divider()
           HStack {
-            Text("原话 · \(entry.clips.count) 句").font(.headline)
+            Text("原话").font(.headline)
             Spacer()
-            Button(selected.count == entry.clips.count ? "取消全选" : "全选") {
-              chosen = selected.count == entry.clips.count ? [] : Set(entry.clips.map(\.id))
-            }.buttonStyle(.link)
-          }
-          ForEach(entry.clips) { clip in
-            if let line = clip.excerpt?.first, let source = model.recording(for: clip) {
-              HStack(alignment: .top, spacing: 4) {
-                Toggle(
-                  "选择原话",
-                  isOn: Binding(
-                    get: { chosen.contains(clip.id) },
-                    set: { if $0 { chosen.insert(clip.id) } else { chosen.remove(clip.id) } }
-                  )
-                ).toggleStyle(.checkbox).labelsHidden().padding(.top, 12)
-                  .accessibilityLabel("选择：" + line.text)
-                TranscriptRow(
-                  line: line, voices: model.voices, voiceID: VoiceRecognition.key(source, line),
-                  active: model.excerptPlaying(clip, line: line), playing: model.player.playing,
-                  clockLabel: DaySentenceTime.label(clip, line: line)
-                ) {
-                  model.playExcerpt(clip, line: line)
-                }
-              }
+            if selecting {
+              Button(selected.count == entry.clips.count ? "取消全选" : "全选") {
+                chosen = selected.count == entry.clips.count ? [] : Set(entry.clips.map(\.id))
+              }.buttonStyle(.link)
             }
           }
-        }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
+          DayTranscriptContent(model: model, entry: entry, selecting: selecting, chosen: $chosen)
+        }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
       }
-      Divider()
-      HStack {
-        Text("已选 \(selected.count) / \(entry.clips.count) 句").font(.callout).foregroundStyle(
-          .secondary)
-        Spacer()
-        Button {
-          edit(selected)
-        } label: {
-          Label("补整理", systemImage: "plus")
-        }
-        .buttonStyle(.borderedProminent).disabled(selected.isEmpty)
-      }.padding(.horizontal, 20).padding(.vertical, 12)
+      if selecting {
+        Divider()
+        HStack {
+          Button("取消") { selecting = false; chosen.removeAll() }.buttonStyle(.plain)
+          Text("已选 \(selected.count) 句").font(.callout).foregroundStyle(Palette.muted)
+          Spacer()
+          Button("加入事项…") { edit(selected) }.buttonStyle(.borderedProminent)
+            .disabled(selected.isEmpty)
+        }.padding(.horizontal, 20).padding(.vertical, 12)
+      }
     }.background(Palette.surface).accessibilityIdentifier("raw-conversation-detail")
   }
 }
@@ -121,10 +99,10 @@ struct OrganizationSheet: View {
   var body: some View {
     let targets = model.workspace(for: draft.day).activities.filter { !$0.isRaw }
     VStack(alignment: .leading, spacing: 15) {
-      Text("补整理").font(.title2.bold())
+      Text("加入事项").font(.title2.bold())
       Picker("保存方式", selection: $action) {
         Text("新建事项").tag(OrganizationAction.create)
-        Text("补进已有事项").tag(OrganizationAction.append)
+        Text("加入已有事项").tag(OrganizationAction.append)
       }.pickerStyle(.segmented).labelsHidden()
 
       if action == .create {
@@ -137,7 +115,7 @@ struct OrganizationSheet: View {
           TextField("摘要", text: $summary, axis: .vertical).lineLimit(2...4)
         }
       } else {
-        if targets.isEmpty { Text("当天还没有可补入的事项。").font(.callout).foregroundStyle(.secondary) }
+        if targets.isEmpty { Text("当天还没有可加入的事项。").font(.callout).foregroundStyle(.secondary) }
         Picker("补进事项", selection: $target) {
           Text("选择当天事项").tag(nil as String?)
           ForEach(targets) { item in

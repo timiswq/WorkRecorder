@@ -111,13 +111,13 @@ public struct ProcessingDocument: Codable, Sendable {
   public var label: String {
     switch phase {
     case "transcribing": return "正在转写"
-    case "organizing": return "正在整理对话"
+    case "organizing": return "正在提取事项"
     case "clipping": return "正在保存剪辑"
     case "complete":
-      if let count = deferredLineIDs?.count, count > 0 { return "已整理 · \(count) 句交由全天归类" }
-      return "已整理"
-    case "failed": return "整理待重试"
-    default: return "待整理"
+      if let count = deferredLineIDs?.count, count > 0 { return "已生成文字与事项 · \(count) 句保留为原话" }
+      return "文字与事项已生成"
+    case "failed": return "录音处理失败"
+    default: return "录音尚未处理"
     }
   }
 }

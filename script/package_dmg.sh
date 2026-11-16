@@ -49,5 +49,5 @@ EOF
 /usr/bin/codesign --verify --strict "$WORKDAY_STAGE/工作留声.app"
 /usr/bin/hdiutil create -srcfolder "$WORKDAY_STAGE" -volname "工作留声 $WORKDAY_VERSION" -fs HFS+ -format UDZO "$WORKDAY_DMG"
 /usr/bin/hdiutil verify "$WORKDAY_DMG"
-/usr/bin/shasum -a 256 "$WORKDAY_DMG" > "$WORKDAY_DMG.sha256"
+(cd "$WORKDAY_OUTPUT/build" && /usr/bin/shasum -a 256 "${WORKDAY_DMG##*/}") > "$WORKDAY_DMG.sha256"
 printf '%s\n' "$WORKDAY_DMG"

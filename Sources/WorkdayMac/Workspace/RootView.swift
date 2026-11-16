@@ -27,7 +27,11 @@ struct RootView: View {
           case .originals: RecordingLibraryView(model: model)
           case .device: RecordingCardView(model: model)
           }
-          if model.player.selectionID != nil && model.player.route == nil {
+          if model.area == .day && model.player.captionID == nil
+            && (model.player.selectionID == nil || model.reviewPlaybackDay != nil)
+            && (!model.dayRecordings.isEmpty || model.reviewPlaybackDay != nil) {
+            DayPlaybackBar(model: model)
+          } else if model.player.selectionID != nil && model.player.route == nil {
             PlayerBar(model: model)
           } else if model.player.route != nil
             || (model.area == .day && !model.workspace.audio.spans.isEmpty)
@@ -71,8 +75,12 @@ struct RootView: View {
     ToolbarItem(placement: .primaryAction) {
       Menu {
         Button("导入本地音频文件…") { model.chooseFiles() }.disabled(model.importLabel != nil)
-        Button("继续整理待处理录音") { model.retryProcessing() }.disabled(model.processingID != nil)
-        if model.processingID != nil { Button("暂停整理") { model.pauseProcessing() } }
+        if model.processingIsRunning || model.processingID != nil {
+          if model.processingPaused { Text("正在暂停后台处理…") }
+          else { Button("暂停后台处理") { model.pauseProcessing() } }
+        } else {
+          Button(model.processingPaused ? "继续后台处理" : "开始处理录音与概述") { model.retryProcessing() }
+        }
         Divider()
         Button("打开资料库目录") { model.reveal() }
         Button("设置…") { openSettings() }
@@ -124,8 +132,8 @@ struct RootView: View {
     case .day:
       switch model.daySidebarState {
       case .updated: return "全天事项有更新，点击查看"
-      case .working: return "正在整理录音与全天事项"
-      case .failed: return "部分整理需重试，右上角可查看任务"
+      case .working: return "后台正在处理录音或生成概述"
+      case .failed: return "有任务需要手动处理，右上角可查看"
       case .none: return area.rawValue
       }
     case .originals:
@@ -156,8 +164,7 @@ struct RootView: View {
   }
 
   @ViewBuilder private func sidebarIndicator(_ area: WorkspaceArea) -> some View {
-    if area == .day { DaySidebarIndicator(state: model.daySidebarState) }
-    else if area == .originals { PendingSyncBadge(model: model) }
+    if area == .originals { PendingSyncBadge(model: model) }
   }
 
   private func navigationLabel(_ title: String, icon: String, expanded: Bool) -> some View {

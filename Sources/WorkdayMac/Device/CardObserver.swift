@@ -131,6 +131,14 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate {
   }
   private func scan() {
     guard desired, !suspended, peripheral == nil, manager?.state == .poweredOn else { return }
+    // A bound recorder may already have a CoreBluetooth connection and stop
+    // advertising. An explicit reconnect can reuse its cached peripheral.
+    if search == .reconnectBound, let boundID, let id = UUID(uuidString: boundID),
+       let device = manager?.retrievePeripherals(withIdentifiers: [id]).first {
+      discovered[id] = device
+      connect(id)
+      return
+    }
     manager?.stopScan()
     choices = []
     discovered = [:]

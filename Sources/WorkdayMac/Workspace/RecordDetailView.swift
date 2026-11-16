@@ -48,7 +48,7 @@ struct RecordDetailView: View {
         if let recording {
           Menu {
             Button("打开原件所在目录") { model.reveal(recording) }
-            RecordingRetryButton(model: model, recording: recording)
+            RecordingRetryButton(model: model, recording: recording, inMenu: true)
           } label: {
             Image(systemName: "ellipsis")
           }.menuStyle(.borderlessButton).fixedSize()
@@ -92,14 +92,10 @@ struct RecordDetailView: View {
               if let clip, !showsOriginal {
                 Text(clip.summary).font(.system(size: 13)).lineSpacing(5).textSelection(.enabled)
               }
-              if let error = model.documents[recording.id]?.error {
+              RecordingRetryButton(model: model, recording: recording)
+              let state = model.recordingProcessingState(recording)
+              if let error = model.documents[recording.id]?.error, state == .failed || state == .needsSetup {
                 ErrorDetailsButton(message: error, context: "录音：\(recording.originalName)")
-                RecordingRetryButton(model: model, recording: recording)
-              } else if model.processingID == recording.id, let label = model.processingLabel {
-                HStack {
-                  ProgressView().controlSize(.small)
-                  Text(label).font(.system(size: 12)).foregroundStyle(Palette.muted)
-                }
               }
               if originalID != nil {
                 ForEach(WorkdayTimeline.days(recording), id: \.self) { day in
@@ -118,7 +114,8 @@ struct RecordDetailView: View {
               Text(showsOriginal || clip == nil ? "完整文字" : "对话原文").font(
                 .system(size: 13, weight: .semibold))
               if lines.isEmpty {
-                Text("暂无转写文字，仍可回听已保存的录音。").font(.system(size: 13)).foregroundStyle(Palette.muted)
+                Text(model.recordingProcessingState(recording) == .complete
+                  ? "这段录音未识别到文字，仍可回听原录音。" : "转写完成后，文字会自动显示在这里；现在仍可回听原录音。").font(.system(size: 13)).foregroundStyle(Palette.muted)
               }
               ForEach(lines) { line in
                 TranscriptRow(
@@ -166,6 +163,7 @@ struct TranscriptRow: View {
   let active: Bool
   var playing = false
   var clockLabel: String? = nil
+  var showsSpeaker = true
   let play: () -> Void
   var body: some View {
     HStack(alignment: .top, spacing: 12) {
@@ -175,7 +173,7 @@ struct TranscriptRow: View {
       }.buttonStyle(.plain).foregroundStyle(Palette.accent)
         .accessibilityLabel("从 \(clockLabel ?? WorkdayDate.clock(line.start)) 开始播放").help("从这句话开始播放")
       VStack(alignment: .leading, spacing: 5) {
-        SpeakerBadge(voices: voices, id: voiceID, fallback: line.speaker)
+        if showsSpeaker { SpeakerBadge(voices: voices, id: voiceID, fallback: line.speaker) }
         Text(line.text).font(.system(size: 14)).lineSpacing(6).textSelection(.enabled)
           .frame(maxWidth: .infinity, alignment: .leading)
       }

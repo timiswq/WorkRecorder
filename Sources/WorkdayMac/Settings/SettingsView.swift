@@ -5,6 +5,7 @@ struct SettingsView: View {
   @ObservedObject var model: AppModel
   @State private var apiKey = ""
   @State private var cloudDetails = false
+  @State private var showingClearSamples = false
   var body: some View {
     VStack(spacing: 0) {
       Picker("设置分类", selection: $model.settingsSection) {
@@ -96,6 +97,10 @@ struct SettingsView: View {
                ? "已保存 \(model.voices.sampleCount) 条本人声纹样本。在发言人的菜单中点「是我」可继续补充。"
                : "在发言人菜单或桌面气泡上点「是我」，用这句话的声纹识别后续发言。")
             .font(.system(size: 11)).foregroundStyle(Palette.muted)
+          if model.voices.inconsistentSampleCount > 0 {
+            Text("有 \(model.voices.inconsistentSampleCount) 条样本与其他本人样本差异较大，建议在正常佩戴录音卡时补充清晰发言。原样本已保留。")
+              .font(.system(size: 11)).foregroundStyle(Palette.muted)
+          }
           if let error = model.voices.error {
             Text(error).font(.caption).foregroundStyle(Palette.amber)
           }
@@ -110,6 +115,25 @@ struct SettingsView: View {
           Spacer()
           Button("清除非本人样本") { model.voices.clearNegativeSamples() }
         }
+      }
+      Divider()
+      row {
+        VStack(alignment: .leading, spacing: 5) {
+          Text("本人识别样本库")
+          Text("本人 \(model.voices.sampleCount) 条 · 非本人 \(model.voices.negativeSampleCount) 条")
+            .font(.system(size: 11)).foregroundStyle(Palette.muted)
+        }
+        Spacer()
+        Button("清空样本库…", role: .destructive) { showingClearSamples = true }
+          .disabled(!model.voices.canClearSamples)
+          .accessibilityIdentifier("clear-voice-samples")
+          .confirmationDialog("清空本人识别样本库？", isPresented: $showingClearSamples,
+                              titleVisibility: .visible) {
+            Button("清空样本库", role: .destructive) { model.voices.clearSamples() }
+            Button("取消", role: .cancel) {}
+          } message: {
+            Text("将清除全部本人和非本人声纹样本。录音、字幕、历史身份标注及其他发言人姓名会保留。此操作不可撤销，清空后可重新标记本人发言。")
+          }
       }
       Divider()
       row {

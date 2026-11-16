@@ -106,8 +106,8 @@ final class DesktopAppearanceTests: XCTestCase {
         }
         VStack(spacing: 12) {
           WorkdayStatusIcon(
-            status: .init(kind: .recording, title: "", detail: "", warning: true), animated: false)
-          Text("录音·转写异常").font(.system(size: 10))
+            status: .init(kind: .recording, title: "", detail: "", warning: true))
+          Text("录音·需注意").font(.system(size: 10))
         }.frame(width: 90, height: 70)
       }
       .foregroundStyle(dark ? Color.white : .black)

@@ -34,6 +34,15 @@ public actor SpeakerEncoder {
     return try embedding(Self.decode(packets))
   }
 
+  /// Realtime windows have already passed continuous VAD/quality checks. Keep
+  /// their original PCM timeline; do not splice frames or apply the legacy
+  /// per-sentence half-agreement gate a second time.
+  public func pcm(_ samples: [Float]) throws -> [Float]? {
+    guard samples.count >= 25_600, samples.count <= 160_000,
+          samples.allSatisfy(\.isFinite) else { return nil }
+    return try vector(samples)
+  }
+
   // The card sends one 20 ms mono Opus packet per 40 bytes. Decode in memory;
   // the ASR timestamps and the ring both use the start of this cloud session.
   static func decode(_ packets: Data) throws -> [Float] {

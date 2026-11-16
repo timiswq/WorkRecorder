@@ -11,6 +11,7 @@ enum StatusStyle {
     }
   }
 
+  /// In-window hardware states keep their native symbols; the assistant belongs to the menu bar.
   static func symbol(_ kind: DesktopStatus.Kind) -> String {
     switch kind {
     case .recording: return "record.circle.fill"
@@ -43,8 +44,13 @@ struct StatusActivityRow: View {
       Text(activity.detail).font(.caption).foregroundStyle(Palette.muted)
         .fixedSize(horizontal: false, vertical: true)
       if let action = activity.action {
-        Button(action.title) { perform(action) }.buttonStyle(.link)
-          .accessibilityIdentifier("status-action-" + activity.id)
+        if action.isSecondary {
+          Button(activity.actionLabel ?? action.title) { perform(action) }.buttonStyle(.bordered)
+            .controlSize(.small).accessibilityIdentifier("status-action-" + activity.id)
+        } else {
+          ProcessingActionButton(title: activity.actionLabel ?? action.title) { perform(action) }
+            .fixedSize().accessibilityIdentifier("status-action-" + activity.id)
+        }
       }
       if let error = activity.error { ErrorDetailsButton(message: error) }
     }.font(.callout).frame(maxWidth: .infinity, alignment: .leading)
@@ -61,7 +67,7 @@ struct AppActivityList: View {
     let status = model.statusPresentation(at: Date())
     let rows = status.activities.filter { includesSync || $0.id != "sync" }
     VStack(alignment: .leading, spacing: 14) {
-      Text("Mac 正在做什么").font(.headline)
+      Text("后台任务").font(.headline)
       if rows.isEmpty {
         Text("无进行中的任务").font(.callout).foregroundStyle(Palette.muted)
       }

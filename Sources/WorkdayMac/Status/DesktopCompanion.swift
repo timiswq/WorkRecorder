@@ -202,7 +202,8 @@ struct CaptionDisplay: Identifiable, Equatable {
         let speaker = model.voices.captionSpeaker(lineID: line.id, evidenceID: evidence)
         content[index].speakerLabel = speaker.label.captionTitle(using: preferences)
         content[index].isMine = speaker.label.isMine
-        content[index].markedHere = speaker.markedHere && (speaker.label.sampleID == evidence || speaker.label.isNegativeSample)
+        content[index].markedHere = speaker.markedHere
+          && (speaker.label.sampleID == evidence || speaker.label.isNegativeSample || evidence.hasPrefix("realtime:"))
         content[index].voiceID = evidence
         content[index].identityControls = speaker.controls
       }
@@ -217,7 +218,8 @@ struct CaptionDisplay: Identifiable, Equatable {
   private func eligibleCaptions() -> [DesktopCaption] {
     guard let model else { return [] }
     qualified.removeAll(keepingCapacity: true)
-    return lastTranscript.compactMap { line in
+    return lastTranscript.compactMap { original in
+      let line = model.voices.presentationLine(original)
       guard !retiredLineIDs.contains(line.id), !line.isSoundFeedback, LiveLine.containsSpeech(line.text),
             model.voices.hasLiveVoice(line.bubbleVoiceID) else { return nil }
       qualified[line.id] = line

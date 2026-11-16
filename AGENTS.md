@@ -3,7 +3,7 @@
 本仓库是工作留声 App 的正式开发目录。源码修改、构建、测试和打包从这里执行。
 
 - 默认直接在当前仓库开发，不使用 worktree 或 subagent；已有未提交改动须保留。
-- 当前基线为 `baseline-2026-11-13`（0.6.0 / 20260005），后续从 `main` 继续。旧基线仅作历史追溯。
+- 当前基线为 `baseline-2026-11-16`（0.7.0 / 20260006），后续从 `main` 继续。旧基线仅作历史追溯。
 - Xcode 入口为 `WorkRecorder.xcodeproj`，scheme 为 `WorkRecorder`；工程配置文件为 `project.xcproj`。
 - 启动入口在 `WorkRecorder/`；界面与协调在 `Sources/WorkdayMac/`，业务处理在 `Sources/WorkdayCore/`，二者按职责分目录；协议在 `Sources/QS668Core/`。
 - 构建：`./script/build_and_run.sh --build-only`。测试：`./script/test.sh`；完整验收：`./script/test.sh --full`。

@@ -6,6 +6,46 @@ import XCTest
 @testable import WorkdayMac
 
 final class WorkspaceLayoutTests: XCTestCase {
+  @MainActor func testUnifiedDayBarKeepsExcerptScopeAndSourceDate() async throws {
+    let (root, model) = try await library()
+    defer { model.player.stop(); try? FileManager.default.removeItem(at: root) }
+    model.selectDay("2026-11-10")
+    let record = try XCTUnwrap(model.dayRecordings.first)
+    let url = model.libraryURL.appendingPathComponent(record.folder).appendingPathComponent(record.originalFile)
+    model.player.load(url: url, id: "excerpt:fixture", recordingID: record.id,
+      title: "逐句回听", position: 0.2, playbackRange: 0.2...0.8)
+    model.selectDay("2026-11-09")
+    XCTAssertEqual(model.reviewPlaybackDay, "2026-11-10")
+    XCTAssertEqual(try XCTUnwrap(model.reviewPlaybackClock), 9 * 3600 + 0.2, accuracy: 0.01)
+    model.seekReviewPlayback(9 * 3600 + 0.5, on: "2026-11-10")
+    XCTAssertEqual(model.player.selectionID, "excerpt:fixture")
+    XCTAssertEqual(model.player.playbackRange, 0.2...0.8)
+    XCTAssertNil(model.player.route)
+    model.seekReviewPlayback(12 * 3600, on: "2026-11-10")
+    XCTAssertEqual(model.player.dayClock, 14 * 3600, accuracy: 0.01)
+    XCTAssertEqual(model.selectedDay, "2026-11-09")
+    XCTAssertFalse(model.player.playing)
+  }
+
+  @MainActor func testPlaybackSpeedAppliesAcrossDaySpans() async throws {
+    let (root, model) = try await library()
+    defer { model.player.stop(); try? FileManager.default.removeItem(at: root) }
+    model.selectDay("2026-11-10")
+    model.player.setExcerptRate(1.5)
+    model.player.startDay(model.workspace.audio, recordings: model.dayRecordings,
+      root: model.libraryURL, autoplay: false)
+    XCTAssertEqual(model.player.playbackRate, 1.5)
+    model.player.step(1)
+    XCTAssertEqual(model.player.playbackRate, 1.5)
+    let bounds = model.workspace.audio.navigationRange
+    let first = try XCTUnwrap(model.workspace.audio.spans.first)
+    XCTAssertEqual(model.workspace.audio.navigationIndex(clock: first.clockEnd, recordingID: first.recordingID), 0,
+      "单段播至末尾时，下一段按钮仍应指向后续录音")
+    XCTAssertLessThanOrEqual(bounds.lowerBound, 9 * 3600)
+    XCTAssertGreaterThanOrEqual(bounds.upperBound, 14 * 3600 + 1)
+    XCTAssertGreaterThanOrEqual(bounds.upperBound - bounds.lowerBound, 1800)
+  }
+
   @MainActor func testCompactPlaybackProgressSkipsGapsWithoutChangingBrowsingDay() async throws {
     let (root, model) = try await library()
     defer {
@@ -109,8 +149,9 @@ final class WorkspaceLayoutTests: XCTestCase {
     }
     let left = try XCTUnwrap(paneFrames().first)
     XCTAssertGreaterThanOrEqual(paneFrames().count, 2)
-    XCTAssertGreaterThan(left.minY, paneFrames()[1].minY + 10,
-      "日期应位于列表分栏内，详情不能被整条日期页头向下推移")
+    XCTAssertGreaterThanOrEqual(left.minY, 50, "列表应保留自己的日期页头")
+    XCTAssertLessThan(paneFrames()[1].minY, 80,
+      "详情从自身标题开始，不应再叠加列表日期页头的高度")
     let split = try XCTUnwrap(views(host.view).compactMap { $0 as? NSSplitView }.first)
     split.setPosition(split.subviews[0].frame.width + 70, ofDividerAt: 0)
     split.layoutSubtreeIfNeeded()

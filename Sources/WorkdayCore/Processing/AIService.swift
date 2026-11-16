@@ -166,8 +166,9 @@ public struct AIService: InferenceServing {
       已经结束后在另一时段再次复盘，应单列为新事项。不能因为初步标题相似就将相隔长时间的工作写成持续开会。
       kind 取 event（有起止的事项）、moment（一句话落实的决定、分工或日程）、aside（缺少结果和上下文的零散工作交流）。
       以内容判别轻重。一个简短而明确的约定也要进入主时间线。不要编造未录到的工作、发言人、结果或时间。
-      返回 {"overview":"两三句当天总结","activities":[{"kind":"event","title":"具体事项","summary":"有依据的经过或结果","parts":[1,2]}],
+      返回 {"overview":"两三句当天概述","activities":[{"kind":"event","title":"具体事项","summary":"有依据的经过或结果","parts":[1,2]}],
       "decisions":[{"text":"明确决定","parts":[1]}],"tasks":[{"text":"明确待办","parts":[2]}]}。
+      overview 用两三句简短事实概括当天主要讨论的工作和实际进展，不重复日期，不罗列待办，不使用“全天聚焦、深度赋能”等空泛措辞。只有时间依据明确时才按上午、下午或晚上描述，不推测未录到的时段。
       optional=false 的序号在 activities 中必须各出现一次。optional=true 是待归类的转写原句，结合相邻内容保留有工作线索的原句，单纯寒暄、试音、无关闲聊直接省略。全是闲聊时 overview 写简短事实，activities 为空。
       每项可带 topics（确实讨论的议题，字符串数组）、appointment（明确约定的未来时间，保留原话）、related（有关但另一次发生的其他事项的输入序号），缺乏依据时省略。
       每项可带 quotes 数组，从提供的原话选至多三句，格式 {"part":输入序号,"line":"该输入中的原句编号"}。
@@ -189,8 +190,8 @@ public struct AIService: InferenceServing {
       let tasks: [Note]
     }
     let response = try JSONDecoder().decode(
-      Response.self, from: await chat(system: instruction, input: input, operation: "整理全天事项"))
-    guard !response.overview.isEmpty else { throw WorkdayError.invalid("未返回全天总结，请重试整理") }
+      Response.self, from: await chat(system: instruction, input: input, operation: "生成当天概述"))
+    guard !response.overview.isEmpty else { throw WorkdayError.invalid("未生成当天概述，请重试") }
     var result = DaySummary(day: day, overview: response.overview,
                             decisions: try response.decisions.map { try $0.resolve(conversations) },
                             tasks: try response.tasks.map { try $0.resolve(conversations) },

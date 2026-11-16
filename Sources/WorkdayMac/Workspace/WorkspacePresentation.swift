@@ -63,7 +63,8 @@ enum WorkspaceDate {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "zh_CN")
     formatter.timeZone = WorkdayTimeline.calendar.timeZone
-    formatter.dateFormat = full ? "yyyy年M月d日 EEEE" : "M月d日 EEEE"
+    formatter.dateFormat = full || day?.prefix(4) != WorkdayDate.day(Date()).prefix(4)
+      ? "yyyy年M月d日 EEEE" : "M月d日 EEE"
     return formatter.string(from: date)
   }
 

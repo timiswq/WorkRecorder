@@ -13,7 +13,7 @@ struct OriginalRecordingRow: View {
             Text(recording.originalName).font(.system(size: 13, weight: .medium)).lineLimit(1)
               .help(recording.originalName)
             Text(
-              "\(humanDuration(recording.duration)) · \(model.documents[recording.id]?.label ?? "已保存")"
+              humanDuration(recording.duration)
             )
             .font(.system(size: 12)).foregroundStyle(Palette.muted)
           }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
@@ -26,9 +26,10 @@ struct OriginalRecordingRow: View {
         .buttonStyle(.plain).foregroundStyle(Palette.accent).accessibilityLabel(
           "播放完整录音，" + recording.originalName)
       }
-      if let error = model.documents[recording.id]?.error {
+      RecordingRetryButton(model: model, recording: recording)
+      let state = model.recordingProcessingState(recording)
+      if let error = model.documents[recording.id]?.error, state == .failed || state == .needsSetup {
         ErrorDetailsButton(message: error, context: "录音：\(recording.originalName)")
-        RecordingRetryButton(model: model, recording: recording).buttonStyle(.link)
       }
     }.padding(13).background(
       model.area == .originals && model.libraryRecordingID == recording.id
@@ -42,15 +43,25 @@ struct OriginalRecordingRow: View {
 struct RecordingRetryButton: View {
   @ObservedObject var model: AppModel
   let recording: Recording
+  var inMenu = false
 
   var body: some View {
-    let queued = model.queuedRecordingRetries.contains(recording.id)
-    let active = model.processingID == recording.id
-    Button(queued ? "已排队，等待重试" : active ? "正在整理" : "重试这段录音") {
-      model.retryProcessing(scope: .recording(recording.id))
+    let state = model.recordingProcessingState(recording)
+    if state != .complete {
+      if inMenu {
+        if let title = state.actionTitle { Button(title) { perform(state) } }
+        else { Text(state.message) }
+      } else {
+        ProcessingStatusView(message: state.message, kind: state.kind, actionTitle: state.actionTitle) {
+          perform(state)
+        }
+      }
     }
-    .disabled(queued || active || model.documents[recording.id]?.phase == "complete")
-    .help(queued ? "当前任务结束后自动重试这段录音" : "从已保存的进度继续整理这段录音")
+  }
+
+  private func perform(_ state: RecordingProcessingState) {
+    if state == .needsSetup { model.requestSettings(.recognition) }
+    else { model.retryProcessing(scope: .recording(recording.id)) }
   }
 }
 
@@ -72,7 +83,7 @@ struct RecordingLibraryView: View {
             Button("显示全部") { model.showOriginals() }
           }
           Button("导入音频…") { model.chooseFiles() }.disabled(model.importLabel != nil)
-        }.buttonStyle(.link).font(.callout)
+        }.buttonStyle(.bordered).controlSize(.small).font(.callout)
       }
       Divider()
       GeometryReader { geometry in

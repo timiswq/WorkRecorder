@@ -10,7 +10,9 @@ if [[ "${1:-}" != "--no-build" ]]; then
     > "$WORKDAY_OUTPUT/validation/scene-build.log" 2>&1
 fi
 WORKDAY_FIXTURE="${WORKDAY_FIXTURES:-$HOME/Documents/CodexArtifacts/WorkRecorder/fixtures}/workspace"
-WORKDAY_STAGE="$(mktemp -d "$WORKDAY_OUTPUT/validation/scene-fixture.XXXXXX")"
+# A freshly signed preview can block on macOS Documents access. Let the shell
+# stage its disposable library in the user temp directory and copy the results back.
+WORKDAY_STAGE="$(mktemp -d "$(getconf DARWIN_USER_TEMP_DIR)/workrecorder-scene.XXXXXX")"
 WORKDAY_CAPTURE_CLOSED=1
 trap 'if [[ "$WORKDAY_CAPTURE_CLOSED" == 1 ]]; then /bin/rm -rf "$WORKDAY_STAGE"; fi' EXIT
 /usr/bin/ditto "$WORKDAY_OUTPUT/build/工作留声.app" "$WORKDAY_STAGE/ScenePreview.app"

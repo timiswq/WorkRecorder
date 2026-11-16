@@ -87,7 +87,7 @@ final class StatusPresentationTests: XCTestCase {
     XCTAssertEqual(status.hardware.kind, .recording)
     XCTAssertFalse(status.hardware.warning)
     XCTAssertEqual(status.attention.count, 1)
-    XCTAssertEqual(status.attention.first?.action, .processing)
+    XCTAssertEqual(status.attention.first?.action, .recognitionSettings, "未配置的失败任务应先引导设置")
     XCTAssertEqual(status.notices.first?.message, "云端整理失败")
   }
 
@@ -113,9 +113,9 @@ final class StatusPresentationTests: XCTestCase {
     model.recordings = [recording()]
     let status = model.statusPresentation(at: Date())
     let processing = status.activities.first { $0.id == "processing" }
-    XCTAssertEqual(processing?.state, .waiting)
+    XCTAssertEqual(processing?.state, .needsAction, "尚需设置时不能显示成会自动开始的等待任务")
     XCTAssertEqual(processing?.action, .recognitionSettings)
-    XCTAssertTrue(processing?.detail.contains("原件已保存") == true)
+    XCTAssertTrue(processing?.detail.contains("录音文件已保存") == true)
     XCTAssertFalse(status.hardware.warning)
     model.documents["record"] = ProcessingDocument(recording: model.recordings[0], model: "test")
     model.processingID = "record"

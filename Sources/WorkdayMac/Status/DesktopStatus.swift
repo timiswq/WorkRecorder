@@ -26,7 +26,7 @@ enum BluetoothBlock {
 }
 
 struct DesktopStatus: Equatable {
-  enum Kind: CaseIterable {
+  enum Kind: CaseIterable, Hashable {
     case disconnected, connecting, unknown, idle, recording, paused, saving, usb
   }
   static let usbRecordingHint = "实时字幕暂停"

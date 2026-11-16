@@ -59,9 +59,6 @@ struct PendingCaption: Equatable {
   let startedAt: Date
   var delayed = false
   var text: String { delayed ? "已收到声音，字幕稍后显示" : "已收到声音" }
-  var displayLine: LiveLine {
-    LiveLine(id: id, segment: -1, sentence: -1, text: text, isFinal: false, isSoundFeedback: true)
-  }
 }
 
 @MainActor final class LivePreview: ObservableObject {

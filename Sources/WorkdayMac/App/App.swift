@@ -34,8 +34,8 @@ public struct WorkdayApp: App {
   func applicationDidFinishLaunching(_ notification: Notification) {
     let capture =
       model.isolated && ProcessInfo.processInfo.environment["WORKDAY_SCENE_CAPTURE"] != nil
-    NSApp.setActivationPolicy(capture ? .accessory : .regular)
-    if !capture { dockBadge = DockBadgeController(model: model, tile: NSApp.dockTile) }
+    NSApp.setActivationPolicy(capture || model.liveVoiceValidation ? .accessory : .regular)
+    if !capture && !model.liveVoiceValidation { dockBadge = DockBadgeController(model: model, tile: NSApp.dockTile) }
     model.start()
   }
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

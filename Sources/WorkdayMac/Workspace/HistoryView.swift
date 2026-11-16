@@ -4,15 +4,13 @@ import WorkdayCore
 struct HistoryView: View {
   @ObservedObject var model: AppModel
   @State private var collapsedPeriods = Set<String>()
-  @State private var rawOnly = false
   @State private var draft: OrganizationDraft?
   @State private var sourceReturn: RecordDetailSelection?
   @State private var sourceLineID: String?
 
   var body: some View {
     let all = model.workspace.activities
-    let raw = all.filter(\.isRaw)
-    let items = rawOnly ? raw : all
+    let items = all
     VStack(spacing: 0) {
       GeometryReader { geometry in
         let wide = geometry.size.width >= 800
@@ -21,7 +19,7 @@ struct HistoryView: View {
           ?? (wide && model.selectedDetail == nil ? items.first : nil)
         if wide && (selected != nil || model.selectedDetail != nil) {
           WorkspaceSplitView {
-            dayList(all: all, raw: raw, items: items, selected: selected, wide: true)
+            dayList(all: all, items: items, selected: selected, wide: true)
               .frame(minWidth: 320, idealWidth: 410, maxWidth: .infinity)
           } trailing: {
             detail(selected, compact: false)
@@ -34,43 +32,39 @@ struct HistoryView: View {
             detail(selected, compact: true)
           }
         } else {
-          dayList(all: all, raw: raw, items: items, selected: nil, wide: false)
+          dayList(all: all, items: items, selected: nil, wide: false)
         }
       }
     }.sheet(item: $draft) { item in
       OrganizationSheet(model: model, draft: item) { id in
         draft = nil
         guard model.selectedDay == item.day else { return }
-        rawOnly = false
         if let target = model.workspace.activities.first(where: { $0.manualIDs.contains(id) }) {
           collapsedPeriods.remove(target.period)
         }
         model.selectedDetail = .conversation(id)
       }
-    }.onChange(of: rawOnly) { _, filter in
-      if filter { model.selectedDetail = nil }
     }.onChange(of: model.selectedDay) { _, _ in
       draft = nil
       collapsedPeriods.removeAll()
-      rawOnly = false
       sourceReturn = nil
       sourceLineID = nil
     }
   }
 
   private func dayList(
-    all: [ActivityEntry], raw: [ActivityEntry], items: [ActivityEntry],
+    all: [ActivityEntry], items: [ActivityEntry],
     selected: ActivityEntry?, wide: Bool
   ) -> some View {
     VStack(spacing: 0) {
       DayWorkspaceHeader(model: model)
       Divider()
-      timeline(all: all, raw: raw, items: items, selected: selected, wide: wide)
-    }
+      timeline(all: all, items: items, selected: selected, wide: wide)
+    }.background(Palette.surface)
   }
 
   private func timeline(
-    all: [ActivityEntry], raw: [ActivityEntry], items: [ActivityEntry],
+    all: [ActivityEntry], items: [ActivityEntry],
     selected: ActivityEntry?, wide: Bool
   ) -> some View {
     ScrollViewReader { proxy in
@@ -98,22 +92,6 @@ struct HistoryView: View {
                 OriginalRecordingRow(model: model, recording: recording) {
                   openSource(recording.id, nil)
                 }
-              }
-            }
-            if !model.workspace.audio.spans.isEmpty {
-              DayActivityOverview(model: model, entries: all, selected: selected?.id)
-            }
-            if !all.isEmpty {
-              HStack {
-                Text("时间线").font(.headline)
-                Spacer(minLength: 8)
-                Picker("时间线范围", selection: $rawOnly) {
-                  Text("全部 · \(all.count)").tag(false)
-                  Text("未整理 · \(raw.count)").tag(true)
-                }.pickerStyle(.segmented).labelsHidden().fixedSize()
-              }
-              if rawOnly && raw.isEmpty {
-                Text("当天的原话都已归入事项。").font(.callout).foregroundStyle(Palette.muted)
               }
             }
             ForEach(["上午", "下午", "晚上", "时间未知"], id: \.self) { period in
@@ -216,23 +194,22 @@ struct HistoryView: View {
       model.selectedDetail = .conversation(entry.id)
     } label: {
       HStack(alignment: .top, spacing: 10) {
-        Circle().strokeBorder(entry.isRaw ? Palette.amber : Palette.accent, lineWidth: 1.6)
-          .background(Circle().fill(entry.isRaw ? Palette.surface : Palette.accent))
+        Circle().strokeBorder(Palette.muted.opacity(0.7), lineWidth: 1.2)
           .frame(width: 7, height: 7).padding(.top, 5)
         Text(entry.timeLabel).font(.system(size: 11).monospacedDigit()).foregroundStyle(
           Palette.muted
         )
-        .frame(width: 77, alignment: .leading).padding(.top, 2)
+        .frame(width: 86, alignment: .leading).padding(.top, 2)
         HStack(spacing: 5) {
           VStack(alignment: .leading, spacing: 4) {
-            if entry.isRaw {
-              Text("未整理 · \(entry.clips.count) 句").font(.caption.weight(.medium)).foregroundStyle(
-                Palette.amber)
+            Text(entry.isRaw ? "对话片段" : entry.activity.title)
+              .font(.system(size: 14, weight: .semibold)).lineLimit(1)
+              .foregroundStyle(entry.id == selected ? Palette.accent : Palette.text)
+            let preview = entry.isRaw
+              ? entry.clips.prefix(3).map(\.summary).joined(separator: " ") : entry.activity.summary
+            if !preview.isEmpty {
+              Text(preview).font(.system(size: 12)).foregroundStyle(Palette.muted).lineLimit(1)
             }
-            Text(entry.activity.title).font(
-              .system(size: entry.isRaw ? 13 : 15, weight: entry.isRaw ? .regular : .semibold)
-            )
-            .lineLimit(2).foregroundStyle(Palette.text)
           }
           if model.player.playing && entry.containsPlayback(model.player) {
             Image(systemName: "speaker.wave.2.fill").font(.caption).foregroundStyle(Palette.accent)
@@ -254,115 +231,8 @@ struct HistoryView: View {
         )
         .contentShape(Rectangle())
     }.buttonStyle(.plain).accessibilityLabel(
-      entry.timeLabel + (entry.isRaw ? "，未整理，" : "，") + entry.activity.title
+      entry.timeLabel + "，" + entry.activity.title
     )
     .accessibilityAddTraits(entry.id == selected ? .isSelected : [])
-  }
-}
-
-struct ActivityInspector: View {
-  @ObservedObject var model: AppModel
-  let entry: ActivityEntry
-  let compact: Bool
-  let openSource: (String, String?) -> Void
-  @State private var showsSources = false
-  var body: some View {
-    ScrollView {
-      LazyVStack(alignment: .leading, spacing: 16) {
-        if compact { Button("‹ 返回全天事项") { model.selectedDetail = nil }.buttonStyle(.link) }
-        Text(entry.activity.title).font(.system(size: 23, weight: .semibold))
-        HStack(spacing: 12) {
-          if compact {
-            Label(entry.timeLabel, systemImage: "clock").font(.callout.monospacedDigit())
-              .foregroundStyle(Palette.muted)
-          }
-          Button {
-            model.playDay(from: entry.clips.first)
-          } label: {
-            Label(entry.start == nil ? "回听这段录音" : "从这里连续播放", systemImage: "play.circle.fill")
-          }.buttonStyle(.plain).foregroundStyle(Palette.accent).font(.callout)
-        }
-        Divider()
-        if !entry.activity.summary.isEmpty {
-          Text("结果与进展").font(.headline)
-          Text(entry.activity.summary).textSelection(.enabled).lineSpacing(4)
-        }
-        let decisions = unique(entry.clips.flatMap(\.decisions))
-        let tasks = unique(entry.clips.flatMap(\.tasks))
-        if !decisions.isEmpty { notes("决定", decisions) }
-        if !tasks.isEmpty { notes("待办", tasks) }
-        Divider()
-        Text("原话").font(.headline)
-        ForEach(entry.clips) { clip in
-          if let recording = model.recording(for: clip) {
-            if entry.addedSentenceIDs.contains(clip.id),
-              entry.clips.first(where: { entry.addedSentenceIDs.contains($0.id) })?.id == clip.id
-            {
-              Label("补入原话", systemImage: "text.badge.plus").font(.callout.weight(.semibold))
-            }
-            let ids = Set(
-              entry.activity.quotes?[clip.id]
-                ?? (entry.activity.quotes?.isEmpty == false ? [] : Array(clip.lineIDs.prefix(2))))
-            let lines =
-              entry.isManualItem || entry.addedSentenceIDs.contains(clip.id)
-              ? (clip.excerpt ?? [])
-              : (model.documents[recording.id]?.transcript ?? []).filter {
-                ids.contains($0.id) && clip.lineIDs.contains($0.id)
-              }
-            ForEach(lines) { line in
-              let active = model.excerptPlaying(clip, line: line)
-              TranscriptRow(
-                line: line, voices: model.voices, voiceID: VoiceRecognition.key(recording, line),
-                active: active,
-                playing: model.player.playing,
-                clockLabel: DaySentenceTime.label(clip, line: line)
-              ) { model.playExcerpt(clip, line: line) }
-            }
-          }
-        }
-        Divider()
-        if let topics = entry.activity.topics, !topics.isEmpty { notes("会议议题", unique(topics)) }
-        if let when = entry.activity.appointment, !when.isEmpty {
-          Text("约定时间").font(.headline)
-          Label(when, systemImage: "calendar")
-        }
-        let related = Set(entry.activity.relatedIDs ?? [])
-        if !related.isEmpty {
-          Text("相关事项").font(.headline)
-          ForEach(
-            model.workspace.activities.filter {
-              !related.isDisjoint(with: $0.activity.conversationIDs)
-            }
-          ) { item in
-            Button(item.timeLabel + "  " + item.activity.title) {
-              model.selectedDetail = .conversation(item.id)
-            }
-            .buttonStyle(.link)
-          }
-        }
-        let ids = unique(entry.clips.map(\.recordingID))
-        DisclosureGroup("录音来源 · \(ids.count)", isExpanded: $showsSources) {
-          ForEach(ids, id: \.self) { id in
-            if let source = model.recordings.first(where: { $0.id == id }) {
-              Button(source.originalName + "  ·  查看原文") {
-                openSource(id, entry.clips.first { $0.recordingID == id }?.lineIDs.first)
-              }
-              .buttonStyle(.link).padding(.vertical, 4)
-            }
-          }
-        }
-      }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
-    }.background(Palette.surface).accessibilityIdentifier("activity-detail")
-  }
-
-  private func unique(_ values: [String]) -> [String] {
-    var seen = Set<String>()
-    return values.filter { seen.insert($0).inserted }
-  }
-  private func notes(_ title: String, _ values: [String]) -> some View {
-    VStack(alignment: .leading, spacing: 6) {
-      Text(title).font(.headline)
-      ForEach(values, id: \.self) { Text($0).textSelection(.enabled) }
-    }
   }
 }

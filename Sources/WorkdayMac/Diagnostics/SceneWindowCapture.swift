@@ -57,10 +57,20 @@ import SwiftUI
         }
         var results: [[String: Any]] = []
         for (name, width, height, dark) in [
+          ("scene-prototype", 1536.0, 980.0, false),
           ("scene-wide", 1140.0, 760.0, false),
           ("scene-minimum", 690.0, 510.0, false),
           ("scene-dark", 1140.0, 760.0, true),
         ] {
+          if name == "scene-prototype" {
+            model.selectedDetail = model.workspace.activities.first(where: { !$0.isRaw }).map {
+              .conversation($0.id)
+            }
+          } else {
+            model.selectedDetail = model.workspace.activities.first(where: \.isRaw).map {
+              .conversation($0.id)
+            }
+          }
           model.preferences.theme = dark ? "dark" : "light"
           window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
           window.setContentSize(NSSize(width: width, height: height))

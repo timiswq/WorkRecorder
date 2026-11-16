@@ -2,6 +2,21 @@ import Foundation
 import WorkdayCore
 
 extension DayAudioTimeline {
+  func navigationIndex(clock: Double, recordingID: String?) -> Int {
+    // A stopped excerpt at a source's endpoint still belongs to that recording.
+    // locate(clock:) intentionally skips that endpoint for continuous day seeking.
+    spans.firstIndex {
+      $0.recordingID == recordingID && $0.clockStart <= clock + 0.000001
+        && clock <= $0.clockEnd + 0.000001
+    } ?? spans.firstIndex { $0.clockEnd > clock } ?? max(0, spans.count - 1)
+  }
+
+  var navigationRange: ClosedRange<Double> {
+    guard let first = spans.first, let last = spans.last else { return 0...86400 }
+    let start = floor(first.clockStart / 1800) * 1800
+    let end = min(86400, max(start + 1800, ceil(last.clockEnd / 1800) * 1800))
+    return start...end
+  }
   /// The compact player uses audio elapsed time; the day ruler uses wall-clock time.
   func clock(atElapsed elapsed: Double) -> Double? {
     guard elapsed.isFinite, let last = spans.last else { return nil }
@@ -15,6 +30,43 @@ extension DayAudioTimeline {
 }
 
 extension AppModel {
+  var reviewPlaybackDay: String? {
+    if let day = player.route?.day { return day }
+    guard let record = recordings.first(where: { $0.id == player.recordingID }),
+      let start = record.startedAt else { return nil }
+    // Keep a segment ending exactly at midnight attached to its actual source day.
+    return WorkdayDate.day(start.addingTimeInterval(min(player.sourcePosition, max(0, record.duration - 0.000001))))
+  }
+
+  var reviewPlaybackClock: Double? {
+    if player.route != nil { return player.dayClock }
+    guard let record = recordings.first(where: { $0.id == player.recordingID }),
+      let start = record.startedAt, let midnight = reviewPlaybackDay.flatMap(WorkspaceDate.date)
+    else { return nil }
+    return start.addingTimeInterval(player.sourcePosition).timeIntervalSince(midnight)
+  }
+
+  func seekReviewPlayback(_ clock: Double, on day: String) {
+    guard clock.isFinite else { return }
+    if player.route == nil, reviewPlaybackDay == day,
+      let record = recordings.first(where: { $0.id == player.recordingID }),
+      let start = record.startedAt, let midnight = WorkspaceDate.date(day)
+    {
+      let source = midnight.addingTimeInterval(clock).timeIntervalSince(start)
+      let range = player.playbackRange ?? 0...record.duration
+      if range.contains(source) { player.seek(source); return }
+    }
+    seekDayAudio(clock, on: day)
+  }
+
+  func showReviewPlaybackDay() {
+    guard let day = reviewPlaybackDay else { return }
+    if player.route != nil { showPlaybackDay(); return }
+    selectDay(day)
+    if let entry = workspace.activities.first(where: { $0.containsPlayback(player) }) {
+      selectedDetail = .conversation(entry.id)
+    } else { selectedDetail = player.recordingID.map(RecordDetailSelection.original) }
+  }
   var playbackHeading: String {
     if let id = player.captionID {
       if let line = captionHistory.records.first(where: { $0.id == id }) {
