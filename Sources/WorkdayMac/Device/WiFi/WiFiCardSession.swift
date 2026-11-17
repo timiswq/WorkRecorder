@@ -13,7 +13,7 @@ final class WiFiCardSession: NSObject, CBPeripheralDelegate {
 
   let peripheral: CBPeripheral
   var onReady: () -> Void = {}
-  var onState: (UInt8, Int?) -> Void = { _, _ in }
+  var onState: (WiFiCardStatus) -> Void = { _ in }
   var onRecordingEvent: (WiFiRecordingEvent, String?) -> Void = { _, _ in }
   var onAudio: (Data) -> Void = { _ in }
   var onAudioAvailable: (Bool) -> Void = { _ in }
@@ -138,9 +138,8 @@ final class WiFiCardSession: NSObject, CBPeripheralDelegate {
         onRecordingEvent(event, name)
       }
       switch frame.key {
-      case 5 where payload.count >= 11:
-        let battery = payload[9]
-        onState(payload[10], battery <= 100 ? Int(battery) : nil)
+      case 5:
+        if let report = WiFiCardStatus(payload) { onState(report) }
       case 31: credentials = try? HotspotCredentials(payload)
       case 27 where openRequest:
         guard payload.first == 0 else {

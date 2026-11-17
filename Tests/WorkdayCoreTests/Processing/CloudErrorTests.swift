@@ -4,7 +4,7 @@ import XCTest
 
 final class CloudErrorTests: XCTestCase {
   private func service(_ fixture: String) -> AIService {
-    let service = AIService(key: "fixture-secret", host: "\(fixture).cn-beijing.maas.aliyuncs.com")
+    let service = AIService(key: "fixture-secret-\(fixture)")
     service.sessionConfiguration.protocolClasses = [CloudErrorResponse.self]
     return service
   }
@@ -47,7 +47,7 @@ final class CloudErrorTests: XCTestCase {
       XCTFail("Expected HTTP 400")
     } catch {
       for field in [
-        "整理对话", "HTTP 400", "模型：qwen-plus", "InvalidModel", "Unknown model", "chat-request",
+        "整理对话", "HTTP 400", "模型：gpt-6.1-sol", "InvalidModel", "Unknown model", "chat-request",
       ] {
         XCTAssertTrue(error.localizedDescription.contains(field), field)
       }
@@ -75,7 +75,7 @@ final class CloudErrorTests: XCTestCase {
     } catch { XCTAssertTrue(error.localizedDescription.contains("整理对话失败")) }
   }
 
-  func testChangingFileModelPinsCompletedChunksButCanRetryAnUnstartedTranscription() async throws {
+  func testLegacyFlash30RecordingResumesWithESPAndRetainsProcessedChunkCount() async throws {
     let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["WORKDAY_TEST_ROOT"] ?? NSTemporaryDirectory())
       .appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -84,22 +84,21 @@ final class CloudErrorTests: XCTestCase {
     try AudioFiles.wav(pcm: Data(repeating: 0, count: 121 * 32000)).write(to: file)
     let store = ArchiveStore(root: root.appendingPathComponent("Library"))
     let recording = try await store.importAudio(file, sourceID: "fixture")
-    let client = AIService(key: "fixture-secret", host: "asr.cn-beijing.maas.aliyuncs.com", recordingModel: .flash30)
-    client.sessionConfiguration.protocolClasses = [CloudErrorResponse.self]
+    let client = service("asr")
     for completed in [0, 1] {
-      var prior = ProcessingDocument(recording: recording, model: RecordingASRModel.flash31.rawValue)
+      var prior = ProcessingDocument(recording: recording, model: "qwen-audio-3.0-asr-flash")
       prior.completedChunks = completed
       try await store.save(prior, recording: recording)
-      let expected = completed == 0 ? RecordingASRModel.flash30 : .flash31
       do {
         _ = try await ProcessingPipeline(store: store).process(recording, service: client)
         XCTFail("Expected the fixture HTTP error")
       } catch {
-        XCTAssertTrue(error.localizedDescription.contains("模型：\(expected.rawValue)"))
+        XCTAssertTrue(error.localizedDescription.contains("模型：\(AIService.recordingModel)"))
       }
       let checkpoint = try await store.document(for: recording)
-      XCTAssertEqual(checkpoint?.model, expected.rawValue)
+      XCTAssertEqual(checkpoint?.model, AIService.recordingModel)
       XCTAssertEqual(checkpoint?.completedChunks, completed)
+      XCTAssertEqual(checkpoint?.legacyFlash30Chunks, completed)
     }
   }
 
@@ -158,7 +157,11 @@ private final class CloudErrorResponse: URLProtocol {
     var headers = ["Content-Type": "application/json"]
     var status = 400
     let body: String
-    switch url.host?.components(separatedBy: ".").first {
+    XCTAssertEqual(url.host, "esp.xkw.cn")
+    let isChat = url.path == "/ai/v1/chat/completions"
+    if !isChat { XCTAssertEqual(url.path, "/ai/v1/services/aigc/multimodal-generation/generation") }
+    let key = request.value(forHTTPHeaderField: "Authorization") ?? ""
+    switch String(key.dropFirst("Bearer fixture-secret-".count)) {
     case "no-words":
       body = #"{"code":"CLIENT_ERROR","message":"ASR_RESPONSE_HAVE_NO_WORDS","request_id":"fixture-request"}"#
     case "no-words-code":
@@ -172,7 +175,7 @@ private final class CloudErrorResponse: URLProtocol {
       body = #"{"message":"ASR_RESPONSE_HAVE_NO_WORDS"}"#
     case "asr":
       body =
-        #"{"code":"InvalidParameter","message":"Unsupported audio format: data:audio/wav;base64,AAAA (Bearer example-token) fixture-secret","request_id":"asr-request","input":"ignored-input"}"#
+        #"{"code":"InvalidParameter","message":"Unsupported audio format: data:audio/wav;base64,AAAA (Bearer example-token) fixture-secret-asr","request_id":"asr-request","input":"ignored-input"}"#
     case "chat":
       body = #"{"error":{"code":"InvalidModel","message":"Unknown model"}}"#
       headers["X-Request-Id"] = "chat-request"

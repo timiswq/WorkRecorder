@@ -122,7 +122,8 @@ final class SyncCoordinatorTests: XCTestCase {
     try Data(repeating: 1, count: 2000).write(
       to: directory.appendingPathComponent("note20261110-100000.opus"))
     try Data().write(to: directory.appendingPathComponent("note20261110-110000.wav"))
-    let result = USBMonitor.files(USBVolume(id: "usb:test", url: root, name: "test"))
+    let uuid = try XCTUnwrap(root.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString)
+    let result = USBMonitor.files(USBVolume(id: "usb:" + uuid, url: root, name: "test"))
     XCTAssertEqual(result.files.count, 2)
     XCTAssertEqual(result.files.filter(\.supported).count, 1)
     XCTAssertEqual(result.files.first?.companionSize, 2000)

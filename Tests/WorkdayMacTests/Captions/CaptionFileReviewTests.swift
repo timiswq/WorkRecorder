@@ -13,11 +13,11 @@ final class CaptionFileReviewTests: XCTestCase {
     let old = TestLiveStream(), next = TestLiveStream()
     var streams = [old, next]
     let local = LivePreview(makeLocalStream: { streams.removeFirst() })
-    let cloud = LivePreview(makeStream: { _ in XCTFail("FileTrans must never open the live socket"); return TestLiveStream() })
+    let cloud = LivePreview(makeStream: { _ in XCTFail("Sentence review must never open the live socket"); return TestLiveStream() })
     let model = AppModel(libraryURL: root, live: cloud, localCaptions: local, fileReviewer: stub)
     let service = AIService(key: "fixture")
     model.preferences.cloudEnabled = true
-    model.preferences.liveModel = .fileTrans
+    model.preferences.liveModel = .segment
     model.configureCaptions(service: service)
     model.card.onAudio?(packets())
     old.onEvent?(.sentence(id: 0, text: "本机先显示", isFinal: false, startMs: 40, endMs: 400))
@@ -55,7 +55,7 @@ final class CaptionFileReviewTests: XCTestCase {
     let local = LivePreview(makeLocalStream: { stream })
     let model = AppModel(libraryURL: root, localCaptions: local, fileReviewer: stub)
     model.preferences.cloudEnabled = true
-    model.preferences.liveModel = .fileTrans
+    model.preferences.liveModel = .segment
     model.preferences.captions.showInFullScreen = true
     model.configureCaptions(service: AIService(key: "fixture"))
     model.desktop.start(model: model)
@@ -105,7 +105,7 @@ final class CaptionFileReviewTests: XCTestCase {
     let local = LivePreview(makeLocalStream: { stream })
     let model = AppModel(libraryURL: root, localCaptions: local, fileReviewer: stub)
     let service = AIService(key: "fixture")
-    model.preferences.liveModel = .fileTrans
+    model.preferences.liveModel = .segment
     model.card.onAudio?(packets()) // 600 ms before opting in
     model.preferences.cloudEnabled = true
     model.configureCaptions(service: service)
@@ -113,7 +113,7 @@ final class CaptionFileReviewTests: XCTestCase {
     stream.onEvent?(.sentence(id: 0, text: "选择前已开始", isFinal: true, startMs: 420, endMs: 720))
     XCTAssertNil(model.captionHistory.records.first?.fileReview)
     stream.onEvent?(.sentence(id: 1, text: "第一版", isFinal: true, startMs: 740, endMs: 840))
-    try await until { model.captionHistory.records.last?.fileReview == .submitted("1") }
+    try await until { await stub.submissions == 1 }
     stream.onEvent?(.sentence(id: 1, text: "新边界", isFinal: true, startMs: 760, endMs: 1120))
     await stub.releaseFirst()
     try await until { model.captionHistory.records.last?.fileReview == .complete("云端 2") }
@@ -123,18 +123,18 @@ final class CaptionFileReviewTests: XCTestCase {
     await model.shutdown()
   }
 
-  @MainActor func testNetworkFailureKeepsLocalAndRetryUsesPersistedTask() async throws {
+  @MainActor func testNetworkFailureKeepsLocalAndRetryUsesPersistedAudio() async throws {
     let root = try testRoot()
     defer { try? FileManager.default.removeItem(at: root) }
-    let stub = ReviewStub(failFirstPoll: true)
-    let config = LiveASRConfiguration(key: "fixture", model: .fileTrans)
+    let stub = ReviewStub(failFirstRequest: true)
+    let config = LiveASRConfiguration(key: "fixture", model: .segment)
     let history = CaptionHistory(root: root)
     history.configureReview(config, reviewer: stub)
     let replay = try XCTUnwrap(CaptionReplay(audio: packets(), startMs: 30, endMs: 210))
     let local = LiveLine(id: "test", segment: 1, sentence: 0, text: "对", isFinal: true,
                          receivedAt: Date(), replay: replay, fileReviewEligible: true)
     history.accept(local, evidenceID: "local-speaker")
-    try await until { history.records.first?.fileReview == .failed(taskID: "1") }
+    try await until { history.records.first?.fileReview == .failed(taskID: nil) }
     XCTAssertEqual(history.records.first?.transcript.text, "对")
     XCTAssertEqual(history.records.first?.transcript.source, .local)
     await history.flush()
@@ -142,12 +142,12 @@ final class CaptionFileReviewTests: XCTestCase {
     let reopened = CaptionHistory(root: root)
     reopened.configureReview(config, reviewer: stub)
     reopened.retryReview(try XCTUnwrap(reopened.records.first))
-    try await until { reopened.records.first?.fileReview == .complete("云端 1") }
+    try await until { reopened.records.first?.fileReview == .complete("云端 2") }
     reopened.accept(local, evidenceID: "corrected-speaker")
-    XCTAssertEqual(reopened.records.first?.transcript.text, "云端 1")
+    XCTAssertEqual(reopened.records.first?.transcript.text, "云端 2")
     XCTAssertEqual(reopened.records.first?.evidenceID, "corrected-speaker")
     let submissions = await stub.submissions
-    XCTAssertEqual(submissions, 1)
+    XCTAssertEqual(submissions, 2)
     await reopened.flush()
   }
 
@@ -162,9 +162,9 @@ final class CaptionFileReviewTests: XCTestCase {
       .appendingPathComponent(UUID().uuidString)
   }
 
-  @MainActor private func until(_ condition: () -> Bool) async throws {
+  @MainActor private func until(_ condition: @MainActor () async -> Bool) async throws {
     for _ in 0..<200 {
-      if condition() { return }
+      if await condition() { return }
       try await Task.sleep(for: .milliseconds(10))
     }
     XCTFail("Timed out waiting for the file review worker")
@@ -174,25 +174,23 @@ final class CaptionFileReviewTests: XCTestCase {
 private actor ReviewStub: CaptionFileTranscribing {
   var submissions = 0
   private var holdFirst: Bool
-  private var failFirstPoll: Bool
+  private var failFirstRequest: Bool
 
-  init(holdFirst: Bool = false, failFirstPoll: Bool = false) {
+  init(holdFirst: Bool = false, failFirstRequest: Bool = false) {
     self.holdFirst = holdFirst
-    self.failFirstPoll = failFirstPoll
+    self.failFirstRequest = failFirstRequest
   }
   func releaseFirst() { holdFirst = false }
 
-  func submitCaption(wav: Data) async throws -> String {
+  func transcribeCaption(wav: Data) async throws -> String {
     guard wav.starts(with: Data("RIFF".utf8)), wav.count > 44 else { throw URLError(.cannotDecodeContentData) }
     submissions += 1
-    return String(submissions)
-  }
-  func captionResult(taskID: String) async throws -> String {
-    if failFirstPoll {
-      failFirstPoll = false
+    let index = submissions
+    if failFirstRequest {
+      failFirstRequest = false
       throw URLError(.networkConnectionLost)
     }
-    while taskID == "1" && holdFirst { try await Task.sleep(for: .milliseconds(5)) }
-    return "云端 " + taskID
+    while index == 1 && holdFirst { try await Task.sleep(for: .milliseconds(5)) }
+    return "云端 " + String(index)
   }
 }

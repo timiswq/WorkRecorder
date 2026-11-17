@@ -153,7 +153,7 @@ final class InventoryPresentationTests: XCTestCase {
     await model.shutdown()
   }
 
-  @MainActor func testUnrelatedCardSameFilenameIsNotHiddenByCurrentRecording() {
+  @MainActor func testUnrelatedCachedCardIsExcludedFromCurrentRecordingInventory() {
     let model = AppModel(
       libraryURL: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(
         UUID().uuidString))
@@ -165,6 +165,6 @@ final class InventoryPresentationTests: XCTestCase {
     model.card.state.connected = true
     model.card.state.apply(frame([3, 20, 1]))
     model.card.state.apply(frame([3, 24] + Array(name.utf8)))
-    XCTAssertEqual(model.pendingCount.total, 1)
+    XCTAssertEqual(model.pendingCount.total, 0)
   }
 }

@@ -42,14 +42,10 @@ struct TodayRecordingStatus: View {
         HStack(spacing: 14) {
           if let block = status.bluetoothBlock {
             if block.usesSettings { BluetoothSettingsButton().help(block.instruction) }
-          } else {
-            Button(model.preferences.boundID == nil ? "绑定录音卡…" : "重新连接") {
-              if model.preferences.boundID == nil {
-                model.requestSettings(.device)
-              } else {
-                model.area = .device
-                if !model.isolated { model.card.activate(.reconnectBound) }
-              }
+          } else if let action = model.hardwareAction(for: status) {
+            Button(action.title) {
+              model.area = .device
+              model.performStatusAction(action)
             }
           }
           if model.recordings.isEmpty {

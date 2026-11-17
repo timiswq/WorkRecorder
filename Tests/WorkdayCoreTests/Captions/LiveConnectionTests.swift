@@ -89,16 +89,12 @@ final class LiveConnectionTests: XCTestCase {
     XCTAssertFalse(failure.contains("private-server-content"))
     connection.cancel()
   }
-  func testCredentialHostAllowlist() throws {
-    let request = try LiveASRConfiguration(
-      key: "test-only", host: "sample.cn-beijing.maas.aliyuncs.com"
-    ).request()
-    XCTAssertEqual(request.url?.scheme, "wss")
-    XCTAssertEqual(request.url?.host, "sample.cn-beijing.maas.aliyuncs.com")
-    XCTAssertThrowsError(try LiveASRConfiguration(key: "test-only", host: "example.com").request())
-    XCTAssertThrowsError(
-      try LiveASRConfiguration(key: "test-only", host: "dashscope.aliyuncs.com@example.com")
-        .request())
+  func testRealtimeRequestsUseTheESPSocketAndAnESPKey() throws {
+    let request = try LiveASRConfiguration(key: "test-only").request()
+    XCTAssertEqual(request.url?.absoluteString, "wss://esp.xkw.cn/ai/ws/v1/inference")
+    XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-only")
+    XCTAssertThrowsError(try LiveASRConfiguration(key: "").request())
+    XCTAssertThrowsError(try LiveASRConfiguration(key: "test-only", model: .segment).request())
   }
   private func audio() -> Data {
     var packet = Data(repeating: 0, count: 40)

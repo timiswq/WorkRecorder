@@ -10,7 +10,7 @@ import WorkdayCore
 
     @MainActor init(_ status: DesktopStatus) {
       image = WorkdayStatusArtwork.image(for: status)
-      title = status.title
+      title = status.namedTitle
       detail = status.detail
     }
   }
@@ -82,7 +82,11 @@ struct MenuBarPanel: View {
     return VStack(alignment: .leading, spacing: 5) {
       HStack(spacing: 8) {
         WorkdayStatusIcon(status: status).foregroundStyle(StatusStyle.color(status))
-        Text(status.title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+        if let name = status.deviceName {
+          Text(name).lineLimit(1).truncationMode(.middle)
+          Text("·").foregroundStyle(.secondary)
+        }
+        Text(status.displayTitle).fixedSize().font(.system(size: 14, weight: .semibold)).lineLimit(1)
         Spacer(minLength: 4)
         if let seconds = status.elapsed {
           Text(WorkdayDate.clock(seconds)).monospacedDigit()
@@ -101,33 +105,22 @@ struct MenuBarPanel: View {
             .accessibilityIdentifier("menu-hardware-action")
         }
       }.font(.system(size: 11))
-    }.help(status.detail + "\n" + status.instruction)
+    }.help(status.namedTitle + "\n" + status.detail + "\n" + status.instruction)
   }
 
   private func hardwareDetail(_ status: DesktopStatus) -> String {
-    var parts: [String] = []
-    if !status.isUSB, let battery = status.battery {
-      parts.append(model.card.state.charging ? "充电中" : "电量 \(battery)%")
-    }
-    switch status.kind {
-    case .recording: parts.append("暂停、结束请在卡上操作")
-    case .paused: parts.append("在录音卡上继续或结束")
-    case .saving: parts.append("正在保存到录音卡")
-    case .idle: parts.append("按录音卡上的按键开始录音")
-    case .connecting: parts.append("请保持录音卡开启并靠近 Mac")
-    case .unknown: parts.append("等待设备回复，录音状态待确认")
-    case .usb:
-      parts.append(model.usb.volumes.map(\.name).joined(separator: "、"))
-      parts.append("卡上录音待确认")
-    case .disconnected:
-      parts.append(status.bluetoothBlock == nil ? "连接后可查看录音状态" : "请检查系统蓝牙设置")
-    }
-    return parts.joined(separator: " · ")
+    if status.isUSB { return "USB 文件连接 · 卡上录音待确认" }
+    if status.bluetoothBlock != nil { return status.instruction }
+    if status.deviceName == nil { return "选择设备后可查看录音状态" }
+    return model.recorderConnectionDetail(status)
   }
 
   private func quickActions(_ presentation: StatusPresentation) -> some View {
     VStack(alignment: .leading, spacing: 0) {
       if model.usesWiFiCard { WiFiSyncControls(model: model, compact: true) } else {
+      if let target = model.recorderSyncTarget, model.cardSync.action == .start || model.cardSync.action == .retry {
+        Button("同步录音") { model.syncRecorder(target) }
+      }
       Button { show(.live) } label: {
         VStack(alignment: .leading, spacing: 2) {
           HStack {
@@ -179,7 +172,7 @@ struct MenuBarPanel: View {
         }
       }.foregroundStyle(Palette.muted)
       Text(summary.detail).font(.system(size: 12)).lineLimit(1)
-        .foregroundStyle(summary.attentionCount > 0 ? Palette.amber : Palette.muted)
+        .foregroundStyle(summary.hasWarning ? Palette.amber : Palette.muted)
     }.help(summary.fullDetail)
   }
 
@@ -191,7 +184,10 @@ struct MenuBarPanel: View {
       }.buttonStyle(MenuBarCommandStyle()).accessibilityIdentifier("menu-open-main")
         .help("打开主窗口，保留上次查看的页面")
       Menu {
-        Button("录音卡") { show(.device) }
+        Button("查看录音卡") { show(.device) }
+        if model.recorderName != nil {
+          Button("切换录音卡…") { selectRecorder() }.disabled(!model.canChangeCard)
+        }
         Button("原始录音") { show(.originals) }
         if model.player.route != nil, !model.player.dayEnded {
           Divider()
@@ -214,9 +210,14 @@ struct MenuBarPanel: View {
     openSettings()
   }
 
+  private func selectRecorder() {
+    model.showRecorderPicker()
+    openMainWindow()
+  }
+
   private func perform(_ action: StatusAction) {
     switch action {
-    case .bind: settings(.device)
+    case .bind: selectRecorder()
     case .recognitionSettings: settings(.recognition)
     case .captionSettings: settings(.captions)
     default: model.performStatusAction(action)

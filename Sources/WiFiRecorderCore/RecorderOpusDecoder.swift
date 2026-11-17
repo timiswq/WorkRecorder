@@ -1,7 +1,7 @@
 import CRecorderOpus
 import Foundation
 
-/// FW925 已下载的 .bin 逐包使用该包头。B0B3 实时流是否使用同样的封装，仍待真机录音确认。
+/// FW925 的设备文件和已验证的 B0B3 实时样本都使用该包头。一个记录可以跨越多条蓝牙通知。
 struct RecordingPacketHeader {
   static let byteCount = 8
   let payloadLength: Int

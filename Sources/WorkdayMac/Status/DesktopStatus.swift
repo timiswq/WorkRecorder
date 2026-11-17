@@ -38,13 +38,21 @@ struct DesktopStatus: Equatable {
   var elapsed: Double?
   var battery: Int?
 
-  var wifiInstruction: String?
+  var deviceName: String?
+  var displayTitle: String {
+    if isUSB { return "USB 已连接" }
+    if kind == .disconnected, bluetoothBlock == nil { return deviceName == nil ? "尚未选择录音卡" : "未连接" }
+    return title
+  }
+  var namedTitle: String { [deviceName, displayTitle].compactMap { $0 }.joined(separator: " · ") }
+
+  var instructionOverride: String?
 
   var canConnect: Bool { kind == .disconnected && bluetoothBlock == nil }
   var isUSB: Bool { kind == .usb }
 
   var instruction: String {
-    if let wifiInstruction { return wifiInstruction }
+    if let instructionOverride { return instructionOverride }
     if let bluetoothBlock { return bluetoothBlock.instruction }
     switch kind {
     case .idle: return "在录音卡上按键开始录音。"
@@ -119,16 +127,20 @@ extension AppModel {
       card: card.state, connection: card.connectionPhase,
       usbConnected: !usesWiFiCard && !usb.volumes.isEmpty,
       bluetoothBlock: card.bluetoothBlock, now: date)
+    status.deviceName = recorderName
+    if let target = card.switchingTo {
+      return .init(kind: .connecting, title: "正在连接", detail: "正在验证设备服务", deviceName: target.name)
+    }
     if usesWiFiCard {
       if wifiSync.usingNetwork {
-        return .init(kind: .connecting, title: "正在通过 Wi-Fi 同步", detail: wifiSync.message, wifiInstruction: wifiSync.message)
-      }
-      if status.kind == .idle {
-        status.wifiInstruction = "在卡上按键开始录音；已有录音可点「同步录音」传到 Mac。"
+        return .init(kind: .connecting, title: "正在通过 Wi-Fi 同步", detail: wifiSync.message, deviceName: recorderName, instructionOverride: wifiSync.message)
       }
       return status
     }
-    if status.canConnect && preferences.boundID == nil {
+    if status.canConnect, preferences.usbOnlyVolumeID != nil {
+      status.instructionOverride = "用 USB 数据线将这张录音卡连接到 Mac。"
+    }
+    if status.canConnect && recorderName == nil {
       return .init(kind: .disconnected, title: "尚未绑定录音卡", detail: "绑定后可查看录音状态和实时字幕。")
     }
     return status

@@ -98,6 +98,58 @@ final class AppleDesktopCaptionTests: XCTestCase {
                    ["开始继续继续下一个好了", "先把今天的日期记下来", "最后再确认一遍全部完成"])
   }
 
+  @MainActor func testFW925SpokenSentencesHaveSeparateFinalsAndReplayRanges() async throws {
+    guard #available(macOS 26, *),
+          let path = ProcessInfo.processInfo.environment["WORKDAY_FW925_SPEECH"],
+          let output = ProcessInfo.processInfo.environment["WORKDAY_TEST_ROOT"]
+    else { throw XCTSkip("Requires the external FW925 spoken sentence fixture and local Chinese speech model") }
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let root = URL(fileURLWithPath: output).appendingPathComponent(UUID().uuidString)
+    let model = AppModel(libraryURL: root)
+    model.localCaptions.configure(enabled: true, service: nil)
+    model.card.onStreamReset?(.started)
+    var mergedWhileSpeaking = false
+    var separatedBeforeBudget = false
+    func refersToMinutes(_ text: String) -> Bool {
+      ["会议", "发给", "小王"].contains(where: text.contains)
+    }
+    for offset in stride(from: 0, to: data.count, by: 200) {
+      let chunk = data.subdata(in: offset..<min(offset + 200, data.count))
+      model.card.onAudio?(chunk)
+      try await Task.sleep(for: .milliseconds(chunk.count / 2))
+      let records = model.captionHistory.records
+      mergedWhileSpeaking = mergedWhileSpeaking || records.contains {
+        $0.text.contains("开会") && refersToMinutes($0.text)
+      }
+      // Check the live rows before the budget sentence appears. A homophone in
+      // the word for "minutes" must not be mistaken for a segmentation failure.
+      if records.count == 2, records[0].text.contains("开会"), refersToMinutes(records[1].text),
+         !records[1].text.contains("预算"), !records[1].isFinal {
+        separatedBeforeBudget = true
+      }
+    }
+    model.card.onStreamReset?(.disconnected)
+    for _ in 0..<200 where model.localCaptions.phase != .waiting {
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    let records = model.captionHistory.records
+    let ranges = model.localCaptions.lines.compactMap(\.recordingRange)
+    let text = records.map(\.text)
+    print("FW925 replay:", text, ranges)
+    XCTAssertFalse(mergedWhileSpeaking, "The second sentence must not appear in the first live row")
+    XCTAssertTrue(separatedBeforeBudget, "The two rows should be readable before the budget sentence")
+    XCTAssertEqual(records.count, 3, text.joined(separator: " | "))
+    XCTAssertTrue(records.allSatisfy { $0.isFinal && $0.replay != nil })
+    for (line, expected) in zip(text, ["开会", "小王", "预算"]) {
+      XCTAssertTrue(line.contains(expected), line)
+    }
+    XCTAssertEqual(ranges.count, 3)
+    for (left, right) in zip(ranges, ranges.dropFirst()) {
+      XCTAssertLessThanOrEqual(left.upperBound, right.lowerBound)
+    }
+    await model.shutdown()
+  }
+
   @MainActor func testLastSentenceBecomesReplayableWhileCardKeepsSendingSilence() async throws {
     guard #available(macOS 26, *),
           let fixture = ProcessInfo.processInfo.environment["WORKDAY_APPLE_SPEECH"],

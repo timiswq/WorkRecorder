@@ -24,9 +24,12 @@ extension AppModel {
   }
 
   func dayOverviewState(for day: String) -> DayOverviewState {
-    let workspace = workspace(for: day)
-    let pending = workspace.recordings.filter { documents[$0.id]?.phase != "complete" }
-    let active = pending.first { processingID == $0.id && processingSummaryDay == nil }
+    let pending = (recordingsByDay[day] ?? []).filter { documents[$0.id]?.phase != "complete" }
+    return dayProcessingState(for: day, pending: pending).withAvailability(processingIsAvailable)
+  }
+
+  func dayProcessingState(for day: String, pending: [Recording]) -> DayOverviewState {
+    let active = pending.first { !processingPaused && processingID == $0.id && processingSummaryDay == nil }
     let stage: String? = active.flatMap {
       if case .working(let stage) = recordingProcessingState($0) { return stage }
       return nil
@@ -36,7 +39,7 @@ extension AppModel {
       pending: pending.count, failedRecordings: pending.filter { documents[$0.id]?.error != nil }.count,
       generating: processingSummaryDay == day,
       queued: summaryIsScheduled(day), failed: summaryErrors[day] != nil,
-      available: processingIsAvailable, recordingStage: stage,
+      recordingStage: stage,
       queuedRecordings: pending.filter { recordingIsScheduled($0) }.count,
       paused: processingPaused, pausing: processingPaused && processingIsRunning,
       busy: processingIsRunning)

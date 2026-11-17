@@ -42,20 +42,29 @@ extension AppModel {
       + (fresh ? "" : "，连接录音卡后更新")
   }
   var boundSource: String? { (usesWiFiCard ? nil : preferences.boundID).map { "ble:\($0)" } }
+  var selectedUSBSource: String? {
+    guard !usesWiFiCard else { return nil }
+    guard let boundSource else { return preferences.usbOnlyVolumeID }
+    guard let id = catalog.bindings[boundSource],
+      catalog.bindings.values.filter({ $0 == id }).count == 1 else { return nil }
+    return id
+  }
   var currentInventories: [DeviceInventory] {
     if usesWiFiCard { return [] }
     if !usb.volumes.isEmpty { return usb.volumes.compactMap { catalog.snapshots[$0.id] } }
     if let boundSource {
-      let sources = [boundSource, catalog.bindings[boundSource]].compactMap { $0 }
+      let sources = [boundSource, selectedUSBSource].compactMap { $0 }
       if let value = sources.compactMap({ catalog.snapshots[$0] }).max(by: {
         $0.observedAt < $1.observedAt
       }) {
         return [value]
       }
+      return []
     }
-    // USB-only users still see the last confirmed directory after unplugging.
-    return catalog.snapshots.values.filter { $0.sourceID.hasPrefix("usb:") }
-      .sorted { $0.observedAt > $1.observedAt }.prefix(1).map { $0 }
+    if let selectedUSBSource { return catalog.snapshots[selectedUSBSource].map { [$0] } ?? [] }
+    // A legacy USB-only library can still display its sole cached directory while offline.
+    let previous = catalog.snapshots.values.filter { $0.sourceID.hasPrefix("usb:") }
+    return previous.count == 1 ? previous : []
   }
   var inventoryIsFresh: Bool {
     guard !currentInventories.isEmpty else { return false }
@@ -125,24 +134,6 @@ extension AppModel {
     catalog.snapshots[inventory.sourceID] = inventory
     persistCatalog()
   }
-  func associateUSB(_ files: [SyncFile]) {
-    guard let boundSource, catalog.bindings[boundSource] == nil,
-      usb.volumes.count == 1, let volume = usb.volumes.first,
-      let snapshot = catalog.snapshots[boundSource], snapshot.complete,
-      Date().timeIntervalSince(snapshot.observedAt) < 300, !snapshot.entries.isEmpty
-    else { return }
-    // A unique, complete directory with matching paired OPUS lengths is evidence;
-    // a model name, volume label, or a lone timestamp is not.
-    let grouped = Dictionary(grouping: snapshot.entries, by: \.stem)
-    guard
-      grouped.allSatisfy({ stem, entries in
-        let matches = files.filter { $0.sourceID == volume.id && $0.stem == stem }
-        return matches.count == 1 && entries.contains { $0.bytes == matches[0].companionSize }
-      })
-    else { return }
-    catalog.bindings[boundSource] = volume.id
-    persistCatalog()
-  }
   func receivePause(name: String, pause: RecordingPause) {
     guard let boundSource else { return }
     let key = boundSource + "|" + InventoryEntry.stem(name)
@@ -178,11 +169,30 @@ extension AppModel {
     }
     if changed { persistCatalog() }
   }
-  func bindCurrentUSB() {
-    guard let boundSource, usb.volumes.count == 1, let volume = usb.volumes.first else { return }
-    catalog.bindings[boundSource] = volume.id
-    persistCatalog()
-    notice = "已将此 USB 录音卡与已绑定蓝牙设备关联"
+  func canAssociateUSB(_ volume: USBVolume) -> Bool {
+    guard let boundSource, usb.volumes.isEmpty, catalog.bindings[boundSource] != volume.id,
+      !catalog.bindings.values.contains(volume.id) else { return false }
+    return catalog.bindings[boundSource] == nil || !card.state.connected
+  }
+
+  func selectUSB(_ volume: USBVolume, associateWithBoundCard: Bool) {
+    guard canChangeCard, usb.mountedVolume(withID: volume.id) == volume else { return }
+    if associateWithBoundCard {
+      guard canAssociateUSB(volume), let boundSource else { return }
+      catalog.bindings[boundSource] = volume.id
+      persistCatalog()
+    } else {
+      guard !card.state.connected else { return }
+      let owners = catalog.bindings.filter { $0.value == volume.id && $0.key.hasPrefix("ble:") }
+      var next = preferences
+      next.recorderKind = .usb
+      next.boundID = owners.count == 1 ? owners.first.map { String($0.key.dropFirst(4)) } : nil
+      next.boundName = next.boundID == nil ? "未绑定录音卡" : volume.name
+      next.usbOnlyVolumeID = next.boundID == nil ? volume.id : nil
+      next.usbOnlyVolumeName = next.boundID == nil ? volume.name : nil
+      preferences = next
+      if next.autoConnect, next.boundID != nil, !isolated { card.activate() }
+    }
   }
   func confirmSavedOnCard() {
     usb.activeFilenameUnknown = false

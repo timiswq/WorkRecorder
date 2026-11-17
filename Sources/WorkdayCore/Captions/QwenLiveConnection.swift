@@ -4,28 +4,21 @@ import QS668Core
 public enum LiveASRModel: String, CaseIterable, Codable, Sendable {
   case streaming = "qwen-audio-3.1-asr-flash-streaming"
   case message = "qwen-audio-3.1-asr-flash-message"
-  case fileTrans = "qwen-audio-3.1-asr-flash-filetrans"
+  case segment = "qwen-audio-3.1-asr-flash"
 }
 
 public struct LiveASRConfiguration: Equatable {
   public static let model = LiveASRModel.streaming.rawValue
   public let key: String
-  public let host: String
   public let selectedModel: LiveASRModel
-  public init(key: String, host: String = "dashscope.aliyuncs.com", model: LiveASRModel = .streaming) {
+  public init(key: String, model: LiveASRModel = .streaming) {
     self.key = key
-    self.host = host
     selectedModel = model
   }
   public func request() throws -> URLRequest {
-    guard selectedModel != .fileTrans else { throw WorkdayError.invalid("FileTrans 需按段提交音频文件。") }
-    guard !key.isEmpty,
-      host == "dashscope.aliyuncs.com"
-        || host.range(
-          of: #"^[a-zA-Z0-9-]+\.cn-beijing\.maas\.aliyuncs\.com$"#, options: .regularExpression)
-          != nil,
-      let url = URL(string: "wss://\(host)/api-ws/v1/inference")
-    else { throw WorkdayError.invalid("实时转写配置无效，请检查百炼密钥和业务空间") }
+    guard selectedModel != .segment else { throw WorkdayError.invalid("逐句复核通过 HTTP 提交音频。") }
+    guard !key.isEmpty else { throw WorkdayError.invalid("请先在设置中保存 ESP API Key") }
+    let url = URL(string: "wss://esp.xkw.cn/ai/ws/v1/inference")!
     var request = URLRequest(url: url)
     request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
     request.setValue("WorkdayMac", forHTTPHeaderField: "User-Agent")
@@ -224,16 +217,15 @@ extension URLSessionWebSocketTask: LiveWebSocket {}
         "auth", "invalid", "forbidden", "quota", "accessdenied", "payment", "modelnotfound",
       ].contains { lower.contains($0) }
       fail(
-        "百炼实时识别失败（\(safeCode)），请检查密钥、实时模型权限及额度。",
+        "ESP 实时识别失败（\(safeCode)），请检查密钥、实时模型权限及额度。",
         code: configurationError ? "configuration" : "service")
     default: onEvent?(event)
     }
   }
   private func networkFailed(_ error: Error) {
     guard !closed else { return }
-    let status = (socket.response as? HTTPURLResponse)?.statusCode
-    if status == 401 || status == 403 {
-      fail("百炼认证失败（HTTP \(status!)），请检查北京地域密钥及实时模型权限。", code: "configuration")
+    if let status = (socket.response as? HTTPURLResponse)?.statusCode, status == 401 || status == 403 {
+      fail("ESP 认证失败（HTTP \(status)），请检查 ESP 密钥及实时模型权限。", code: "configuration")
     } else {
       fail("实时识别连接中断（\((error as NSError).code)），请检查网络。")
     }

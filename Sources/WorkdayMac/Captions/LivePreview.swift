@@ -164,11 +164,11 @@ struct PendingCaption: Equatable {
     self.makeStream = makeStream
   }
   func configure(enabled: Bool, service: AIService?, model: LiveASRModel = .streaming) {
-    let config = service.map { LiveASRConfiguration(key: $0.key, host: $0.host, model: model) }
+    let config = service.map { LiveASRConfiguration(key: $0.key, model: model) }
     guard self.enabled != enabled || configuration != config else { return }
     // An open socket owns its model until it has delivered the tail of its sentence.
     if self.enabled == enabled, let config, let current = configuration,
-       config.key == current.key, config.host == current.host {
+       config.key == current.key {
       configuration = config
       if phase == .failed { retry() }
       return
@@ -183,7 +183,7 @@ struct PendingCaption: Equatable {
     retryAfter = .distantPast
     phase = enabled && (makeLocalStream != nil || config != nil) ? .waiting : .disabled
     if !enabled { status = makeLocalStream == nil ? "云端实时识别已关闭。" : "本机字幕已关闭。" }
-    else { status = config == nil && makeLocalStream == nil ? "请在设置中保存百炼 API Key。" : waitingMessage }
+    else { status = config == nil && makeLocalStream == nil ? "请在设置中保存 ESP API Key。" : waitingMessage }
   }
   private var streamByteLimit: Int {
     if makeLocalStream != nil {

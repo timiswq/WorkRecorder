@@ -63,6 +63,9 @@ extension AppModel {
     let pending = "\(prefix)\(count.total) 段待同步"
 
     if usb.volumes.isEmpty {
+      if !usb.detectedVolumes.isEmpty, !card.state.connected {
+        return .init(title: "请选择 USB 录音卡", instruction: "点「选择录音卡」或「切换录音卡」选择要同步的 USB 设备。")
+      }
       return .init(
         title: count.total > 0 ? pending + " · 等待 USB 连接" : "等待 USB 连接",
         instruction: automatic
@@ -94,9 +97,9 @@ extension AppModel {
   }
 
   func performCardSync(_ action: CardSyncPresentation.Action) {
-    guard cardSync.action == action || cardSyncFailure?.action == action else { return }
+    guard !usesWiFiCard, card.switchingTo == nil, cardSync.action == action || cardSyncFailure?.action == action else { return }
     switch action {
-    case .start, .retry: retrySync()
+    case .start, .retry: syncRecorder(recorderSyncTarget)
     case .retryCleanup: sync.retry()
     case .confirm: confirmSavedOnCard()
     }
@@ -106,11 +109,23 @@ extension AppModel {
 struct SyncStatusView: View {
   @ObservedObject var model: AppModel
   var showsOriginalsAction = true
+  var onDevicePage = false
   @State private var showsDetails = false
 
-  var body: some View {
+  @ViewBuilder var body: some View {
+    if onDevicePage {
+      content
+    } else {
+      content.padding(18)
+        .background(Palette.surface, in: RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Palette.line))
+    }
+  }
+
+  private var content: some View {
     let state = model.cardSync
-    HStack(alignment: .top, spacing: 12) {
+    let sourceID = model.usb.volumes.first?.id
+    return HStack(alignment: .top, spacing: 12) {
       Group {
         if state.isWorking { ProgressView().controlSize(.small).accessibilityLabel(state.title) }
         else {
@@ -131,7 +146,10 @@ struct SyncStatusView: View {
         }
         HStack(spacing: 14) {
           if let action = state.action {
-            Button(action.rawValue) { model.performCardSync(action) }
+            Button(action.rawValue) {
+              guard let sourceID, model.usb.volumes.first?.id == sourceID else { return }
+              model.performCardSync(action)
+            }
               .buttonStyle(.borderedProminent).accessibilityIdentifier("card-sync-action")
           } else if state.hasSavedOriginals && showsOriginalsAction {
             Button("查看原始录音") { model.showOriginals() }.buttonStyle(.borderedProminent)
@@ -143,10 +161,7 @@ struct SyncStatusView: View {
       Spacer(minLength: 0)
     }
     .controlSize(.small)
-    .padding(18)
     .frame(maxWidth: .infinity, alignment: .leading)
-    .background(Palette.surface, in: RoundedRectangle(cornerRadius: 9))
-    .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Palette.line))
     .accessibilityElement(children: .contain).accessibilityIdentifier("card-sync")
   }
 

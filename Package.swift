@@ -15,6 +15,8 @@ let package = Package(
       name: "CRecorderOpus",
       cSettings: [
         .define("HAVE_CONFIG_H"),
+        // Keep real-time Opus decoding optimized during app debugging.
+        .unsafeFlags(["-O1"], .when(configuration: .debug)),
         .headerSearchPath("upstream"), .headerSearchPath("upstream/include"),
         .headerSearchPath("upstream/celt"), .headerSearchPath("upstream/silk"),
       ]),

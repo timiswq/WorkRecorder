@@ -131,7 +131,7 @@ final class WiFiArchiveTests: XCTestCase {
     model.preferences = next
     model.card.state.connected = true
     model.card.state.updateWiFi(raw: 1, battery: 80)
-    XCTAssertFalse(model.card.canSwitch)
+    XCTAssertTrue(model.canChangeCard)
     XCTAssertEqual(model.preferences.boundID, "old")
     let status = model.statusPresentation(at: Date())
     XCTAssertEqual(status.hardware.kind, .recording)

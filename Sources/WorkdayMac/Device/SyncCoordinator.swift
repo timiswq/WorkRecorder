@@ -182,6 +182,7 @@ import WorkdayCore
             }
             let recording = try await store.importAudio(
               source, sourceID: file.sourceID, companionName: file.companionName,
+              volumeUUID: mounted.first { $0.id == file.sourceID }?.uuid,
               transfer: { sink.yield($0) })
             if failedFile?.sourceID == file.sourceID && failedFile?.name == file.name {
               clearError()

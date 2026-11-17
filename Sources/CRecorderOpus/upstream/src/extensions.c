@@ -117,6 +117,8 @@ static opus_int32 skip_extension(const unsigned char **pdata, opus_int32 len,
    return len;
 }
 
+/* All iterator positions are within this opus_int32-sized packet, so their
+   byte offsets and payload lengths fit in opus_int32. */
 void opus_extension_iterator_init(OpusExtensionIterator *iter,
  const unsigned char *data, opus_int32 len, opus_int32 nb_frames) {
    celt_assert(len >= 0);
@@ -195,7 +197,7 @@ static int opus_extension_iterator_next_repeat(OpusExtensionIterator *iter,
             ext->id = repeat_id_byte >> 1;
             ext->frame = iter->repeat_frame;
             ext->data = curr_data0 + header_size;
-            ext->len = iter->curr_data - curr_data0 - header_size;
+            ext->len = (opus_int32)(iter->curr_data - ext->data);
          }
          return 1;
       }
@@ -279,7 +281,7 @@ int opus_extension_iterator_next(OpusExtensionIterator *iter,
          int ret;
          iter->repeat_l = L;
          iter->repeat_frame = iter->curr_frame + 1;
-         iter->repeat_len = curr_data0 - iter->repeat_data;
+         iter->repeat_len = (opus_int32)(curr_data0 - iter->repeat_data);
          iter->src_data = iter->repeat_data;
          iter->src_len = iter->repeat_len;
          ret = opus_extension_iterator_next_repeat(iter, ext);
@@ -300,7 +302,7 @@ int opus_extension_iterator_next(OpusExtensionIterator *iter,
             ext->id = id;
             ext->frame = iter->curr_frame;
             ext->data = curr_data0 + header_size;
-            ext->len = iter->curr_data - curr_data0 - header_size;
+            ext->len = (opus_int32)(iter->curr_data - ext->data);
          }
          return 1;
       }

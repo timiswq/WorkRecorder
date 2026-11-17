@@ -122,6 +122,33 @@ final class DesktopPresentationTests: XCTestCase {
     XCTAssertFalse(CardObserver.Search.all.selects("card", boundID: "card", autoConnect: true))
   }
 
+  func testManualDisconnectEndsLiveAudioAndWaitsForExplicitSelection() throws {
+    let card = CardObserver()
+    let id = UUID()
+    card.boundID = id.uuidString
+    card.state = try recording()
+    card.choices = [CardChoice(id: id, name: "旧卡", rssi: -60)]
+    var boundaries: [LiveAudioBoundary] = []
+    card.onStreamReset = { boundaries.append($0) }
+
+    card.disconnect()
+    XCTAssertFalse(card.state.connected)
+    XCTAssertEqual(card.connectionPhase, .disconnected)
+    XCTAssertEqual(boundaries, [.disconnected])
+    XCTAssertTrue(card.choices.isEmpty)
+    XCTAssertEqual(card.boundID, id.uuidString)
+
+    card.updateBluetoothState(.poweredOff)
+    card.updateBluetoothState(.poweredOn)
+    card.suspendForUSB(true)
+    card.suspendForUSB(false)
+    card.resumeAfterWake()
+    card.activateAutomatically()
+    XCTAssertFalse(card.scanning)
+    XCTAssertEqual(card.connectionPhase, .disconnected)
+    XCTAssertEqual(boundaries, [.disconnected])
+  }
+
   func testSearchingAndConnectingHaveDistinctStatusText() {
     let card = CardState()
     let searching = DesktopStatus.resolve(card: card, connection: .searching)
@@ -236,7 +263,7 @@ final class DesktopPresentationTests: XCTestCase {
     XCTAssertTrue(prefs.captions.enabled)
     XCTAssertFalse(prefs.captions.showInFullScreen)
     let decoded = try JSONDecoder().decode(Preferences.self, from: JSONEncoder().encode(prefs))
-    XCTAssertEqual(decoded.workspaceID, "workspace")
+    XCTAssertEqual(decoded.libraryPath, "/custom/library")
     XCTAssertEqual(decoded.captions, prefs.captions)
   }
 

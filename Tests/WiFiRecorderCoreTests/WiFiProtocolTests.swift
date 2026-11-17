@@ -3,6 +3,23 @@ import XCTest
 @testable import WiFiRecorderCore
 
 final class WiFiProtocolTests: XCTestCase {
+  func testStorageFractionFromCapturedStatusKeepsCapacityUnitIndependent() throws {
+    var parser = BLEParser()
+    let status = try XCTUnwrap(captures().flatMap { parser.feed($0) }.first { $0.key == 5 })
+    let report = try XCTUnwrap(WiFiCardStatus(status.payload))
+    XCTAssertEqual(try XCTUnwrap(report.freeStorageFraction), 59_627.0 / 59_628, accuracy: 0.0000001)
+    XCTAssertEqual(report.battery, 60)
+    XCTAssertEqual(report.recordingCode, 1)
+    XCTAssertNil(WiFiCardStatus(Array(status.payload.prefix(10))))
+    for (total, free) in [(0, 0), (10, 11)] {
+      let bytes = Wire.beBytes(UInt64(total)) + Wire.beBytes(UInt64(free)) + [0, 65, 1]
+      let invalidSpace = try XCTUnwrap(WiFiCardStatus(bytes))
+      XCTAssertNil(invalidSpace.freeStorageFraction)
+      XCTAssertEqual(invalidSpace.battery, 65)
+      XCTAssertEqual(invalidSpace.recordingCode, 1)
+    }
+  }
+
   func testFrozenCommandsAndCRC() {
     XCTAssertEqual(Wire.crc(Array("123456789".utf8)), 0xBB3D)
     let cases: [(UInt8, String)] = [

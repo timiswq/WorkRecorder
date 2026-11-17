@@ -36,13 +36,16 @@ struct StatusActivityRow: View {
         if activity.isWorking {
           ProgressView().controlSize(.mini).accessibilityLabel("任务进行中")
         } else {
-          Image(systemName: activity.state == .needsAction ? "exclamationmark.circle" : activity.state == .complete ? "checkmark.circle" : "clock")
+          Image(systemName: symbol)
             .accessibilityHidden(true)
         }
         Text(activity.title).fontWeight(.medium).fixedSize(horizontal: false, vertical: true)
       }.foregroundStyle(activity.state == .needsAction ? Palette.amber : Palette.text)
-      Text(activity.detail).font(.caption).foregroundStyle(Palette.muted)
-        .fixedSize(horizontal: false, vertical: true)
+      if !activity.detail.isEmpty {
+        Text(activity.detail).font(.caption).foregroundStyle(Palette.muted)
+          .fixedSize(horizontal: false, vertical: true)
+          .help(activity.error ?? activity.detail)
+      }
       if let action = activity.action {
         if action.isSecondary {
           Button(activity.actionLabel ?? action.title) { perform(action) }.buttonStyle(.bordered)
@@ -52,29 +55,33 @@ struct StatusActivityRow: View {
             .fixedSize().accessibilityIdentifier("status-action-" + activity.id)
         }
       }
-      if let error = activity.error { ErrorDetailsButton(message: error) }
+      if activity.day == nil, let error = activity.error { ErrorDetailsButton(message: error) }
     }.font(.callout).frame(maxWidth: .infinity, alignment: .leading)
       .accessibilityElement(children: .contain)
+  }
+
+  private var symbol: String {
+    switch activity.state {
+    case .needsAction: return "exclamationmark.circle"
+    case .manual: return "circle"
+    case .complete: return "checkmark.circle"
+    default: return "clock"
+    }
   }
 }
 
 struct AppActivityList: View {
   @ObservedObject var model: AppModel
-  @ObservedObject var desktop: DesktopCompanion
-  var includesSync = true
 
   var body: some View {
     let status = model.statusPresentation(at: Date())
-    let rows = status.activities.filter { includesSync || $0.id != "sync" }
+    let rows = status.activities
     VStack(alignment: .leading, spacing: 14) {
       Text("后台任务").font(.headline)
       if rows.isEmpty {
         Text("无进行中的任务").font(.callout).foregroundStyle(Palette.muted)
       }
       ForEach(rows) { row in StatusActivityRow(activity: row, perform: model.performStatusAction) }
-      if includesSync, !rows.contains(where: { $0.id == "caption" }), status.hardware.isUSB {
-        StatusActivityRow(activity: status.caption, perform: model.performStatusAction)
-      }
     }.frame(maxWidth: .infinity, alignment: .leading)
   }
 }

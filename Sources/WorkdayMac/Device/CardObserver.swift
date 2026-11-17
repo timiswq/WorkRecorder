@@ -16,6 +16,7 @@ struct CardChoice: Identifiable {
   let name: String
   let rssi: Int
   var kind: RecorderKind?
+  var serial: String?
 }
 
 /// 工作留声负责发现、绑定和显示设备状态。机身按键的协议应答由 GATT 会话统一发送。
@@ -25,9 +26,13 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
   @Published var status = CardObserver.initialStatus
   @Published var choices: [CardChoice] = []
   @Published var name = "AI 录音卡"
+  private(set) var serial: String?
   @Published var scanning = false
   @Published private(set) var connectionPhase: CardConnectionPhase = .disconnected
   @Published private(set) var bluetoothBlock: BluetoothBlock?
+  @Published private(set) var switchingTo: CardChoice?
+  @Published private(set) var selectionError: String?
+  var onSelectionFailed: (() -> Void)?
   var onBound: ((String, String) -> Void)?
   var onPause: ((String, RecordingPause) -> Void)?
   private var pauseTracker = PauseTracker()
@@ -38,7 +43,15 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
   var onStreamReset: ((LiveAudioBoundary) -> Void)?
   /// A start key or confirmed idle-to-recording transition, independent of audio/file boundaries.
   var onRecordingStarted: (() -> Void)?
-  var boundID: String?
+  private(set) var stateDeviceID: String?
+  var boundID: String? {
+    didSet {
+      if oldValue != boundID, !state.connected, let stateDeviceID, stateDeviceID != boundID {
+        state = CardState()
+        self.stateDeviceID = nil
+      }
+    }
+  }
   var autoConnect = true
   var preferredKind = RecorderKind.usb
   var wifiBusy = false
@@ -51,24 +64,8 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
   var onHotspot: ((HotspotCredentials) -> Void)?
   var onSocket: (() -> Void)?
   var onWiFiLost: (() -> Void)?
-  private var switching = false
-  private var requestedID: String?
+  private var cancellingConnection = false
 
-  var canSwitch: Bool {
-    !wifiBusy && (!state.connected || state.isFresh() && state.phase == .idle)
-  }
-  func findAnother(id: String? = nil) {
-    guard canSwitch else { return }
-    requestedID = id
-    let mode: Search = id == nil ? .all : .reconnectBound
-    suspended = false
-    if peripheral != nil {
-      switching = true
-      search = mode
-      desired = true
-      stopBluetooth()
-    } else { activate(mode) }
-  }
   func releaseForWiFi() {
     guard let link = wifiSession else { return }
     holdReconnect = true
@@ -102,7 +99,13 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
   private var requests: [CardQuery: Date] = [:]
   private var needsInventory = false
 
+  func activateAutomatically() {
+    guard autoConnect, switchingTo == nil, search != .all else { return }
+    activate()
+  }
+
   func activate(_ search: Search = .preferred) {
+    if search == .all { suspended = false }
     self.search = search
     desired = true
     if manager == nil {
@@ -130,7 +133,12 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
   }
   func disconnect() {
     desired = false
-    search = .preferred
+    switchingTo = nil
+    selectionError = nil
+    // Stay in manual selection until the user connects a card or explicitly reconnects.
+    search = .all
+    choices = []
+    discovered.removeAll()
     stopBluetooth()
     status = "蓝牙已断开"
     connectionPhase = .disconnected
@@ -139,12 +147,12 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
     guard suspended != value else { return }
     suspended = value
     if value {
-      search = .preferred
       stopBluetooth()
       status = "通过 USB 连接"
       connectionPhase = .usb
-    } else if desired {
+    } else {
       connectionPhase = .disconnected
+      status = "蓝牙已断开"
       deadline = .distantPast
       scan()
     }
@@ -154,10 +162,14 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
     scanning = false
     endSession()
     // 等系统回调释放 peripheral，避免在上一个连接尚未断开时连接同一张卡。
-    if let peripheral { manager?.cancelPeripheralConnection(peripheral) }
+    if let peripheral {
+      cancellingConnection = true
+      manager?.cancelPeripheralConnection(peripheral)
+    }
   }
   private func endSession() {
     let wasConnected = state.connected
+    serial = nil
     wifiAudio.reset()
     wifiAudioIssue = nil
     wifiSession?.close()
@@ -182,7 +194,8 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
     guard desired, !suspended, !holdReconnect, peripheral == nil, manager?.state == .poweredOn else { return }
     // A bound recorder may already have a CoreBluetooth connection and stop
     // advertising. An explicit reconnect can reuse its cached peripheral.
-    if search == .reconnectBound, let selected = requestedID ?? boundID, let id = UUID(uuidString: selected),
+    let target = switchingTo?.id ?? (search == .reconnectBound ? boundID.flatMap(UUID.init(uuidString:)) : nil)
+    if let id = target,
        let device = manager?.retrievePeripherals(withIdentifiers: [id]).first {
       discovered[id] = device
       connect(id)
@@ -198,15 +211,38 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
     manager?.scanForPeripherals(
       withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
   }
+  func switchConnection(to choice: CardChoice) {
+    guard !wifiBusy, switchingTo == nil else { return }
+    if let bluetoothBlock, bluetoothBlock != .preparing {
+      selectionError = "未能连接 \(choice.name)。\(bluetoothBlock.title)"
+      return
+    }
+    disconnect()
+    switchingTo = choice
+    activate(.all)
+  }
+
+  private func selectionFailed(_ message: String) {
+    guard let target = switchingTo else { return }
+    switchingTo = nil
+    selectionError = "未能连接 \(target.name)。\(message)"
+    desired = false
+    onSelectionFailed?()
+  }
+
   func connect(_ id: UUID) {
-    guard !suspended, !wifiBusy || id.uuidString == boundID, peripheral == nil, let device = discovered[id] else { return }
+    guard !suspended, !wifiBusy || id.uuidString == boundID,
+          switchingTo == nil || switchingTo?.id == id,
+          peripheral == nil, let device = discovered[id] else { return }
     desired = true
-    requestedID = nil
-    search = .preferred
+    if search == .reconnectBound { search = .preferred }
     manager?.stopScan()
     scanning = false
     state = CardState()
-    name = choices.first(where: { $0.id == id })?.name ?? device.name ?? "AI 录音卡"
+    stateDeviceID = id.uuidString
+    let advertised = choices.first { $0.id == id }
+    serial = switchingTo?.serial ?? advertised?.serial
+    name = switchingTo?.name ?? advertised?.name ?? device.name ?? "AI 录音卡"
     peripheral = device
     session = nil
     listeningFilename = nil
@@ -228,12 +264,14 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
     default: bluetoothBlock = .preparing
     }
     if let bluetoothBlock {
-      if bluetoothBlock != .preparing { search = .preferred }
+      if bluetoothBlock != .preparing { selectionFailed(bluetoothBlock.title) }
+      if bluetoothBlock != .preparing, search == .reconnectBound { search = .preferred }
       status = bluetoothBlock.instruction
       connectionPhase = suspended ? .usb : .unavailable
       scanning = false
       choices = []
       peripheral = nil
+      cancellingConnection = false
       endSession()
     } else if !suspended, !state.connected {
       connectionPhase = .disconnected
@@ -246,36 +284,26 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
     advertisementData: [String: Any], rssi: NSNumber
   ) {
     guard scanning, !suspended else { return }
-    let services =
-      (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? [])
-      + (advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID] ?? [])
-    let name =
-      advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? peripheral.name ?? "AI 录音卡"
-    let advertised = services.map { $0.uuidString.uppercased() }
-    let manufacturer = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data
-    let wifi = advertised.contains("B0B0") || manufacturer.flatMap { DeviceIdentity.manufacturer(Array($0)) } != nil
-      || ["doway", "ainote", "x95", "k95"].contains { name.lowercased().contains($0) }
-    let usb = RecorderProfile.matches(name: name, services: advertised)
-    guard search == .all || (requestedID ?? boundID) == peripheral.identifier.uuidString || wifi || usb else { return }
     let index = choices.firstIndex { $0.id == peripheral.identifier }
-    let kind: RecorderKind? = wifi ? .wifi : usb ? .usb : index.flatMap { choices[$0].kind }
-    let row = CardChoice(id: peripheral.identifier, name: name, rssi: rssi.intValue, kind: kind)
+    let row = CardChoice(peripheral: peripheral, advertisement: advertisementData,
+                         rssi: rssi.intValue, previous: index.map { choices[$0] })
+    guard search == .all || boundID == row.id.uuidString || row.kind != nil else { return }
     if let index { choices[index] = row } else { choices.append(row) }
     discovered[peripheral.identifier] = peripheral
-    if search.selects(peripheral.identifier.uuidString, boundID: requestedID ?? boundID, autoConnect: autoConnect) {
-      connect(peripheral.identifier)
-    }
+    let shouldConnect = switchingTo.map { $0.id == row.id }
+      ?? search.selects(row.id.uuidString, boundID: boundID, autoConnect: autoConnect)
+    if shouldConnect { connect(row.id) }
   }
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
     guard self.peripheral?.identifier == peripheral.identifier else { return }
-    guard desired, !suspended, session == nil else { return }
+    guard desired, !suspended, !cancellingConnection, session == nil else { return }
     peripheral.delegate = self
     let usbServices = RecorderProfile.supported.map { CBUUID(string: $0.service) }
     peripheral.discoverServices(usbServices + [WiFiCardSession.serviceID])
   }
 
   func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-    guard self.peripheral === peripheral, desired, !suspended else { return }
+    guard self.peripheral === peripheral, desired, !suspended, !cancellingConnection else { return }
     guard error == nil, let services = peripheral.services else {
       fail("读取录音卡服务失败")
       return
@@ -305,6 +333,9 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
     wifiSession = link
     link.onReady = { [weak self] in
       guard let self else { return }
+      self.switchingTo = nil
+      self.selectionError = nil
+      self.search = .preferred
       self.state.connected = true
       self.connectionPhase = .connected
       self.boundID = peripheral.identifier.uuidString
@@ -316,7 +347,9 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
       self.wifiAudioIssue = available ? nil : "未能订阅这张卡的蓝牙实时音频，可在录完后同步。"
       if !available && self.state.phase == .recording { self.wifiBoundary(.corrupted) }
     }
-    link.onState = { [weak self] raw, battery in self?.receiveWiFiState(raw, battery: battery) }
+    link.onState = { [weak self] report in
+      self?.receiveWiFiState(report.recordingCode, battery: report.battery, freeStorageFraction: report.freeStorageFraction)
+    }
     link.onRecordingEvent = { [weak self] event, name in self?.receiveWiFiEvent(event, name: name) }
     link.onAudio = { [weak self] data in self?.receiveWiFiAudio(data) }
     link.onHotspot = { [weak self] in self?.onHotspot?($0) }
@@ -325,9 +358,9 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
     link.open(service)
   }
 
-  func receiveWiFiState(_ raw: UInt8, battery: Int?) {
+  func receiveWiFiState(_ raw: UInt8, battery: Int?, freeStorageFraction: Double? = nil) {
     let previous = state.phase
-    state.updateWiFi(raw: raw, battery: battery)
+    state.updateWiFi(raw: raw, battery: battery, freeStorageFraction: freeStorageFraction)
     wifiPhaseChanged(from: previous)
     onWiFiState?(raw)
   }
@@ -404,15 +437,24 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
     status = suspended ? "通过 USB 连接" : message
     connectionPhase = suspended ? .usb : .disconnected
     if wasWiFi { onWiFiLost?() }
-    if switching { switching = false; scan() }
+    if cancellingConnection {
+      cancellingConnection = false
+      scan()
+    } else {
+      selectionFailed(message)
+    }
   }
   private func fail(_ message: String) {
+    selectionFailed(message)
     status = message
     connectionPhase = .unavailable
     if let peripheral { manager?.cancelPeripheralConnection(peripheral) }
   }
   private func becameReady(hasKeys: Bool) {
     guard let peripheral else { return }
+    switchingTo = nil
+    selectionError = nil
+    search = .preferred
     state.connected = true
     state.receivesKeyEvents = hasKeys
     connectionPhase = .connected
@@ -517,7 +559,7 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
     }
   }
   private func tick() {
-    guard !suspended else { return }
+    guard !suspended, !cancellingConnection else { return }
     let now = Date()
     if let wifiSession, state.connected {
       if !wifiBusy && now.timeIntervalSince(lastPoll) >= 5 { lastPoll = now; wifiSession.queryState() }
@@ -547,10 +589,11 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
         }
       }
     } else if scanning, now > deadline {
-      if search == .reconnectBound { search = .preferred; requestedID = nil }
+      if search == .reconnectBound { search = .preferred }
       manager?.stopScan()
       scanning = false
-      status = choices.isEmpty ? "未发现录音卡，正在等待" : "请在设置中选择录音卡"
+      selectionFailed("请确认设备已开启并靠近 Mac。")
+      status = choices.isEmpty ? "未发现录音卡，正在等待" : "请选择录音卡"
       connectionPhase = .disconnected
       deadline = now.addingTimeInterval(5)
     } else if peripheral != nil, now > deadline {

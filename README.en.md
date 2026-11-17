@@ -4,14 +4,14 @@
 
 A native macOS app for QS668 / CB08 and B3085 (FW925) recorder cards. Keep original recordings on your Mac, follow live captions, replay individual sentences, identify familiar speakers locally, and organize conversations into a daily timeline. Cloud transcription and summaries are optional.
 
-Current development version: **0.7.0 (20260006)**. The baseline is tagged `baseline-2026-11-16`; development continues on `main`. This is an actively developed project. Automated tests do not establish real-device reliability, cloud availability, or speaker recognition accuracy in real meetings.
+Current development version: **0.7.0 (20260006)**. The baseline is tagged `baseline-2026-11-17`; development continues on `main`. This is an actively developed project. Automated tests do not establish real-device reliability, cloud availability, or speaker recognition accuracy in real meetings.
 
 Select the B3085 in device settings. After recording, choose **Sync recordings** to download files over the card’s Wi-Fi hotspot. The library keeps the device original and a playable WAV. Bluetooth audio in a supported format feeds the same captions and speaker recognition as the QS668 / CB08. Continuous live audio and the full sync flow still need verification on the FW925.
 
 ## Features
 
 - USB archival with file-size and SHA-256 verification before configured cleanup of card copies.
-- Apple on-device captions, optional Alibaba Cloud Bailian transcription, 24-hour caption history, and sentence replay.
+- Apple on-device captions, optional ESP transcription, 24-hour caption history, and sentence replay.
 - Dismissible desktop captions, a menu bar status panel, and a Dock icon that changes with recorder state and shows the pending-sync count.
 - Live speaker matching with local CAM++ and Silero models. Confirm or correct a speaker, review samples, or reset the sample library in Settings.
 - Daily overviews and transcripts grouped by morning, afternoon, and evening. Follow processing progress or replay recordings from the time-of-day scrubber.
@@ -22,7 +22,7 @@ Select the B3085 in device settings. After recording, choose **Sync recordings**
 - Full app build: **Xcode 27.2 or later**. The Xcode project uses the `project.xcproj` format.
 - SwiftPM tests: **Xcode 26.2 or later** and its macOS SDK. The package uses Swift tools 6.0 and Swift 5 language mode.
 - Recorder features: Bluetooth and USB for the QS668 / CB08, or Bluetooth and Wi-Fi for the B3085 (FW925).
-- Optional cloud features: your own Bailian API key for the Beijing region, service access, and network connectivity. Provider charges may apply.
+- Optional cloud features: your own ESP API key, service access, and network connectivity. Provider charges may apply.
 
 You can build, run ordinary tests, and import local audio without a recorder card. Initial dependency resolution needs internet access. Apple speech recognition needs an available on-device language model. SwiftPM compiles modules and tests; the Xcode project packages the full app's permissions, icons, and license resources.
 
@@ -41,7 +41,7 @@ cd WorkRecorder
 
 Open `WorkRecorder.xcodeproj` and select **WorkRecorder → My Mac** for app development. The build script uses ad hoc signing and does not require the maintainer's developer team. Configure your own signing and notarization for distribution. Current DMG packaging targets Apple Silicon and is not Developer ID signed or notarized.
 
-Run `./script/build_and_run.sh` to build and launch. Bind a recorder in Settings and explicitly enable cloud features if desired. USB sync can remove matching card copies after verified archival; review the [user guide](docs/使用指南.md) before use.
+Run `./script/build_and_run.sh` to build and launch. Select a recorder from the device page in the sidebar and explicitly enable cloud features if desired. USB sync can remove matching card copies after verified archival; review the [user guide](docs/使用指南.md) before use.
 
 Artifacts go outside the checkout, by default to `~/Documents/CodexArtifacts/WorkRecorder/开发构建/`. Override this with `WORKDAY_ARTIFACTS`. Direct `swift build` / `swift test` commands should also use an external `--scratch-path`.
 
@@ -73,7 +73,7 @@ Detailed project documentation and the app interface are currently in Simplified
 
 ## Privacy
 
-The default library is `~/Documents/工作留声/`. Audio, transcripts, summaries, and speaker samples are stored locally; API keys are stored in macOS Keychain. Local storage does not imply application-level encryption. Cloud features are disabled by default. Once enabled, selected audio and text are sent to the configured Bailian services; FileTrans also uploads caption audio to provider-managed temporary storage. Review the provider's data terms before enabling it. See [privacy and data](docs/隐私与数据.md).
+The default library is `~/Documents/工作留声/`. Audio, transcripts, summaries, and speaker samples are stored locally; API keys are stored in macOS Keychain. Local storage does not imply application-level encryption. Cloud features are disabled by default. Once enabled, selected audio and text are sent to the ESP gateway, including local audio segments when sentence review is enabled. Review the provider's data terms before enabling it. See [privacy and data](docs/隐私与数据.md).
 
 ## Contributing and license
 

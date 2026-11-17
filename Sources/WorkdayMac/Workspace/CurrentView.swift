@@ -154,7 +154,7 @@ struct CurrentView: View {
     let time = CaptionTime.seconds.string(from: record.time)
     let speakerColor = speaker.label.isMine ? Palette.accent : Palette.muted
     let canRetry =
-      model.preferences.liveModel == .fileTrans && model.preferences.cloudEnabled
+      model.preferences.liveModel == .segment && model.preferences.cloudEnabled
       && model.preferences.realtime && model.hasKey && model.preferences.captions.enabled
 
     return VStack(alignment: .leading, spacing: 4) {

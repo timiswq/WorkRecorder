@@ -15,8 +15,6 @@ struct DeviceStatusBar: View {
       switch component {
       case .hardware:
         hardware(presentation)
-          .onAppear { model.card.monitorsWindowBattery = true }
-          .onDisappear { model.card.monitorsWindowBattery = false }
       case .activity:
         activity(presentation)
       }
@@ -31,7 +29,7 @@ struct DeviceStatusBar: View {
         Divider().frame(height: 13)
         batteryLabel(battery)
       }
-    }.fixedSize().frame(width: 300, height: 24, alignment: .leading)
+    }.frame(width: 300, height: 24, alignment: .leading)
       .accessibilityElement(children: .contain).accessibilityIdentifier("workspace-hardware-status")
       .help(status.detail + "\n" + status.instruction)
   }
@@ -39,12 +37,13 @@ struct DeviceStatusBar: View {
   // Keep each builder small enough for the Xcode 26.2 SwiftUI type checker.
   private func hardwareButton(_ status: DesktopStatus) -> some View {
     let elapsed = status.elapsed.map { "，已录 " + WorkdayDate.clock($0) } ?? ""
-    let accessibility = "录音卡：" + status.title + elapsed + "，查看设备详情"
+    let needsPicker = status.deviceName == nil
+    let accessibility = status.namedTitle + elapsed + (needsPicker ? "，选择录音卡" : "，查看设备详情")
     return Button {
-      model.area = .device
+      if needsPicker && model.canChangeCard { model.showRecorderPicker() } else { model.area = .device }
     } label: {
       hardwareLabel(status)
-    }.buttonStyle(.plain).help("查看录音卡详情")
+    }.buttonStyle(.plain).help(accessibility)
       .accessibilityLabel(accessibility)
       .accessibilityHint(status.instruction)
   }
@@ -52,12 +51,15 @@ struct DeviceStatusBar: View {
   private func hardwareLabel(_ status: DesktopStatus) -> some View {
     HStack(spacing: 6) {
       Image(systemName: "externaldrive").foregroundStyle(Palette.muted)
-      Text("录音卡").foregroundStyle(Palette.muted)
+      if let name = status.deviceName {
+        Text(name).lineLimit(1).truncationMode(.middle).foregroundStyle(Palette.muted)
+      }
       Image(systemName: StatusStyle.symbol(status.kind))
         .foregroundStyle(StatusStyle.color(status)).accessibilityHidden(true)
-      Text(status.title).fontWeight(.semibold).foregroundStyle(StatusStyle.color(status))
+      Text(status.deviceName == nil && status.canConnect ? "选择录音卡…" : status.displayTitle)
+        .lineLimit(1).fixedSize(horizontal: true, vertical: false).fontWeight(.semibold).foregroundStyle(StatusStyle.color(status))
       if let seconds = status.elapsed {
-        Text(WorkdayDate.clock(seconds)).monospacedDigit().foregroundStyle(StatusStyle.color(status))
+        Text(WorkdayDate.clock(seconds)).monospacedDigit().fixedSize().foregroundStyle(StatusStyle.color(status))
       } else if status.kind == .recording || status.kind == .paused {
         Text("时长待更新").foregroundStyle(Palette.muted)
       }
@@ -80,20 +82,20 @@ struct DeviceStatusBar: View {
       showsActivity.toggle()
     } label: {
       HStack(spacing: 5) {
-        Image(systemName: presentation.attention.isEmpty ? "list.bullet" : "exclamationmark.circle")
+        Image(systemName: presentation.hasWarning ? "exclamationmark.circle" : "list.bullet")
           .overlay(alignment: .topTrailing) {
-            if presentation.attention.isEmpty && presentation.activities.contains(where: \.isWorking) {
+            if !presentation.hasWarning && presentation.activities.contains(where: \.isWorking) {
               Circle().fill(Palette.accent).frame(width: 5, height: 5).offset(x: 3, y: -2)
             }
           }
         Image(systemName: "chevron.down").font(.system(size: 9))
-      }.foregroundStyle(presentation.attention.isEmpty ? Palette.muted : Palette.amber)
+      }.foregroundStyle(presentation.hasWarning ? Palette.amber : Palette.muted)
     }.buttonStyle(.plain).frame(width: 35, height: 24, alignment: .trailing)
       .help("后台任务：" + presentation.summary)
       .accessibilityLabel("后台任务：" + presentation.summary)
       .accessibilityIdentifier("workspace-app-status")
       .popover(isPresented: $showsActivity) {
-        ScrollView { AppActivityList(model: model, desktop: desktop).padding(18) }
+        ScrollView { AppActivityList(model: model).padding(18) }
           .frame(width: 360).frame(maxHeight: 480)
       }
   }

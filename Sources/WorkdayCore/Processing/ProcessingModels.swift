@@ -81,6 +81,7 @@ public struct ProcessingDocument: Codable, Sendable {
   public var conversations: [Conversation] = []
   public var updatedAt = Date()
   public var model: String
+  public var legacyFlash30Chunks: Int?
   public init(recording: Recording, model: String) {
     recordingID = recording.id
     sourceHash = recording.sha256

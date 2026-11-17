@@ -7,6 +7,31 @@ import XCTest
 @testable import WorkdayMac
 
 final class SidebarStatusTests: XCTestCase {
+  @MainActor func testDeviceTitleFollowsConnectedCardAndFallsBackAfterDisconnect() {
+    let root = makeRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = AppModel(libraryURL: root)
+    XCTAssertEqual(model.recorderSidebarTitle, "录音卡")
+
+    model.card.onWiFiBound?("fixture-fw925", "FW925")
+    XCTAssertEqual(model.recorderName, "FW925")
+    XCTAssertEqual(model.recorderSidebarTitle, "录音卡")
+    model.card.name = "FW925"
+    model.card.state.connected = true
+    XCTAssertEqual(model.recorderSidebarTitle, "FW925")
+    model.card.state.disconnect()
+    XCTAssertEqual(model.recorderSidebarTitle, "录音卡")
+
+    model.preferences.recorderKind = .usb
+    model.preferences.usbOnlyVolumeID = "usb:fixture"
+    model.preferences.usbOnlyVolumeName = "CB08"
+    XCTAssertEqual(model.recorderSidebarTitle, "录音卡")
+    model.usb.volumes = [.init(id: "usb:fixture", url: root, name: "CB08")]
+    XCTAssertEqual(model.recorderSidebarTitle, "CB08")
+    model.usb.volumes = []
+    XCTAssertEqual(model.recorderSidebarTitle, "录音卡")
+  }
+
   @MainActor func testKnownPendingOriginalKeepsBadgeWhileRecordingAndAfterDisconnect() {
     let root = makeRoot()
     defer { try? FileManager.default.removeItem(at: root) }

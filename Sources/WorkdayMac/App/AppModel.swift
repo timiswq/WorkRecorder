@@ -26,7 +26,17 @@ enum Destination: String, CaseIterable {
       applyPreferences()
     }
   }
-  @Published var recordings: [Recording] = [] { didSet { invalidateDayInputs() } }
+  @Published var recordings: [Recording] = [] {
+    didSet {
+      var byDay: [String: [Recording]] = [:]
+      for recording in recordings {
+        for day in WorkdayTimeline.days(recording) { byDay[day, default: []].append(recording) }
+      }
+      recordingsByDay = byDay
+      invalidateDayInputs()
+    }
+  }
+  private(set) var recordingsByDay: [String: [Recording]] = [:]
   @Published var documents: [String: ProcessingDocument] = [:] { didSet { invalidateDayInputs() } }
   @Published var summaries: [String: DaySummary] = [:] { didSet { cachedDays.removeAll() } }
   @Published var dayUpdates = DayResultUpdates()
@@ -85,11 +95,18 @@ enum Destination: String, CaseIterable {
   @Published var notice: String?
   @Published var hasKey = false
   @Published var loading = true
-  @Published var catalog = DeviceCatalog()
+  @Published var catalog = DeviceCatalog() {
+    didSet {
+      if catalog.bindings != oldValue.bindings, card.switchingTo == nil { usb.select(selectedUSBSource) }
+    }
+  }
   var catalogRevision = 0
   var catalogSaveTask: Task<Void, Never>?
+  private let makeWiFiSync: ((ArchiveStore) -> WiFiRecordingSync)?
+  var canUseWiFiSync: Bool { !isolated || makeWiFiSync != nil }
   private(set) var wifiSync: WiFiRecordingSync
-  var canChangeCard: Bool { !sync.isBusy && !wifiSync.busy && card.canSwitch }
+  @Published var showsRecorderPicker = false
+  var canChangeCard: Bool { !sync.isBusy && !wifiSync.busy && card.switchingTo == nil }
   var usesWiFiCard: Bool { preferences.recorderKind == .wifi }
   let card = CardObserver()
   let audioMeter = LiveAudioMeter()
@@ -141,7 +158,7 @@ enum Destination: String, CaseIterable {
   var processingIsAvailable: Bool { inference != nil || service != nil }
   var isBusy: Bool { wifiSync.busy || sync.isBusy || processingTask != nil || catalogSaveTask != nil || dayUpdatesSaveTask != nil }
   var libraryURL: URL { store.root }
-  var days: [String] { Array(Set(recordings.flatMap(WorkdayTimeline.days))).sorted(by: >) }
+  var days: [String] { recordingsByDay.keys.sorted(by: >) }
   var workspace: DayWorkspace {
     workspace(for: selectedDay ?? "")
   }
@@ -170,11 +187,13 @@ enum Destination: String, CaseIterable {
   }
   var service: AIService? {
     guard preferences.cloudEnabled, let key, !key.isEmpty else { return nil }
-    return AIService(key: key, host: preferences.host, recordingModel: preferences.recordingModel)
+    return AIService(key: key)
   }
 
   init(libraryURL: URL? = nil, inference: (any InferenceServing)? = nil, live: LivePreview? = nil,
-       localCaptions: LivePreview? = nil, fileReviewer: (any CaptionFileTranscribing)? = nil) {
+       localCaptions: LivePreview? = nil, fileReviewer: (any CaptionFileTranscribing)? = nil,
+       makeWiFiSync: ((ArchiveStore) -> WiFiRecordingSync)? = nil) {
+    self.makeWiFiSync = makeWiFiSync
     self.inference = inference
     self.fileReviewer = fileReviewer
     self.live = live ?? LivePreview()
@@ -203,7 +222,7 @@ enum Destination: String, CaseIterable {
     captionHistory = CaptionHistory(root: store.root)
     voices = VoiceRecognition(root: store.root)
     self.store = store
-    wifiSync = WiFiRecordingSync(store: store, card: card)
+    wifiSync = makeWiFiSync?(store) ?? WiFiRecordingSync(store: store, card: card)
     sync = SyncCoordinator(store: store)
     pipeline = ProcessingPipeline(store: store)
     for publisher in [
@@ -222,6 +241,10 @@ enum Destination: String, CaseIterable {
     attachWiFiSync()
     card.onBound = { [weak self] id, name in self?.rememberCard(.usb, id: id, name: name) }
     card.onWiFiBound = { [weak self] id, name in self?.rememberCard(.wifi, id: id, name: name) }
+    card.onSelectionFailed = { [weak self] in
+      guard let self else { return }
+      self.usb.select(self.selectedUSBSource)
+    }
     card.onPause = { [weak self] name, gap in self?.receivePause(name: name, pause: gap) }
     card.onInventory = { [weak self] value in self?.receiveInventory(value) }
     card.onAudio = { [weak self] data in
@@ -250,11 +273,13 @@ enum Destination: String, CaseIterable {
     }
     usb.onConnection = { [weak self] connected in
       guard let self else { return }
-      let needsSave = !self.usesWiFiCard && connected && [.recording, .paused, .saving].contains(self.card.state.phase)
+      let needsSave = connected && self.card.stateDeviceID != nil
+        && self.card.stateDeviceID == self.preferences.boundID
+        && [.recording, .paused, .saving].contains(self.card.state.phase)
       let name = self.card.state.filename
       self.usb.excludedStems = needsSave ? Set(name.map { [InventoryEntry.stem($0)] } ?? []) : []
       self.usb.activeFilenameUnknown = needsSave && name == nil
-      if !self.usesWiFiCard { self.card.suspendForUSB(connected) }
+      self.card.suspendForUSB(connected)
       self.sync.retry()
     }
     usb.onScan = { [weak self] scan in self?.receiveUSBScan(scan) }
@@ -322,7 +347,7 @@ enum Destination: String, CaseIterable {
       wifiSync.retryLocal()
       if !isolated {
         usb.start()
-        if preferences.autoConnect { card.activate() }
+        card.activateAutomatically()
       } else if liveVoiceValidation, preferences.boundID != nil {
         card.activate(.reconnectBound)
         startLiveVoiceValidationReport()
@@ -334,6 +359,7 @@ enum Destination: String, CaseIterable {
     card.boundID = preferences.selectedRecorderID
     card.preferredKind = preferences.recorderKind
     card.autoConnect = preferences.autoConnect
+    usb.select(card.switchingTo == nil ? selectedUSBSource : nil)
     if preferences.autoSync, !manualSyncVolumes.isEmpty { manualSyncVolumes = [] }
     configureCaptions(service: service)
     if !preferences.captions.enabled && !liveVoiceValidation { voices.resetLiveAudio() }
@@ -345,9 +371,9 @@ enum Destination: String, CaseIterable {
   }
   func configureCaptions(service: AIService?) {
     let cloudEnabled = preferences.realtime && preferences.cloudEnabled
-    let fileMode = preferences.liveModel == .fileTrans
+    let fileMode = preferences.liveModel == .segment
     let reviewConfig = cloudEnabled && fileMode && preferences.captions.enabled
-      ? service.map { LiveASRConfiguration(key: $0.key, host: $0.host, model: .fileTrans) } : nil
+      ? service.map { LiveASRConfiguration(key: $0.key, model: .segment) } : nil
     localCaptions.collectForFileReview = reviewConfig != nil
     captionHistory.configureReview(reviewConfig, reviewer: reviewConfig != nil ? fileReviewer ?? service : nil)
     live.configure(enabled: cloudEnabled && !fileMode, service: fileMode ? nil : service, model: preferences.liveModel)
@@ -423,6 +449,8 @@ enum Destination: String, CaseIterable {
     var next = preferences
     if next.selectedRecorderID != id { wifiSync.clearDeviceResult() }
     next.recorderKind = kind
+    next.usbOnlyVolumeID = nil
+    next.usbOnlyVolumeName = nil
     if kind == .wifi { next.wifiBoundID = id; next.wifiBoundName = name }
     else { next.boundID = id; next.boundName = name }
     if kind == .wifi && !usesWiFiCard { sync.updateUSB([], stableFiles: [], volumes: []) }
@@ -430,9 +458,14 @@ enum Destination: String, CaseIterable {
     if kind == .usb && !usb.volumes.isEmpty { card.suspendForUSB(true) }
   }
 
-  func startWiFiSync() {
-    guard usesWiFiCard, !isolated, let id = preferences.wifiBoundID else { return }
-    wifiSync.start(id: id, after: processingTask)
+  func syncRecorder(_ target: RecorderSyncTarget?) {
+    guard let target, target == recorderSyncTarget else { return }
+    switch target {
+    case .wifi(let id):
+      guard canUseWiFiSync else { return }
+      wifiSync.start(id: id, after: processingTask)
+    case .usb: retrySync()
+    }
   }
 
   private func attachWiFiSync() {
@@ -447,7 +480,7 @@ enum Destination: String, CaseIterable {
 
   func configureChanged() {
     applyPreferences()
-    if preferences.autoConnect, !isolated { card.activate() }
+    if !isolated { card.activateAutomatically() }
     if preferences.autoSync, !isolated { usb.refresh() }
     scheduleProcessing()
   }
@@ -542,7 +575,7 @@ enum Destination: String, CaseIterable {
   private func captionVoiceID(for local: LiveLine) -> String? {
     if let id = localFeedbackID(local),
       localCaptions.confirmationAudio[local.id] == nil || voices.label(id) != nil { return id }
-    guard preferences.liveModel != .fileTrans, let range = local.recordingRange else { return nil }
+    guard preferences.liveModel != .segment, let range = local.recordingRange else { return nil }
     let overlapping = live.lines.filter { $0.recordingRange?.overlaps(range) == true }
     guard overlapping.count == 1, let cloud = overlapping.first, let span = cloud.recordingRange,
       span.lowerBound <= range.lowerBound, span.upperBound >= range.upperBound else { return nil }
@@ -570,7 +603,6 @@ enum Destination: String, CaseIterable {
   }
   private func receiveUSBScan(_ scan: USBScan) {
     guard !usesWiFiCard else { return }
-    associateUSB(scan.ready)
     receiveUSBInventories(scan.inventories)
     // A manual run covers the mounted cards until their saved recordings are copied.
     // Large batches may span many scans. Unplugging ends that card's request.
@@ -1032,7 +1064,7 @@ enum Destination: String, CaseIterable {
       captionHistory = CaptionHistory(root: url)
       configureCaptions(service: service)
       store = ArchiveStore(root: url)
-      wifiSync = WiFiRecordingSync(store: store, card: card)
+      wifiSync = makeWiFiSync?(store) ?? WiFiRecordingSync(store: store, card: card)
       attachWiFiSync()
       wifiSync.retryLocal()
       voices = VoiceRecognition(root: url)

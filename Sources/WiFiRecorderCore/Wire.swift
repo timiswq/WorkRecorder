@@ -24,6 +24,23 @@ public struct Packet {
     self.profile = profile
   }
 }
+
+/// B3085 key 5 reports total and free space in the same, undocumented unit.
+public struct WiFiCardStatus {
+  public let recordingCode: UInt8
+  public let battery: Int?
+  public let freeStorageFraction: Double?
+
+  public init?(_ payload: [UInt8]) {
+    guard payload.count >= 11 else { return nil }
+    let total = Wire.be32(payload, 0)
+    let free = Wire.be32(payload, 4)
+    freeStorageFraction = total > 0 && free <= total ? Double(free) / Double(total) : nil
+    battery = payload[9] <= 100 ? Int(payload[9]) : nil
+    recordingCode = payload[10]
+  }
+}
+
 public struct RecordingEntry: Identifiable, Equatable {
   public let wireName: [UInt8]
   public let size: UInt64

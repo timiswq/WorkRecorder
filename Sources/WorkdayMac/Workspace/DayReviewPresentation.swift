@@ -10,7 +10,7 @@ enum DayOverviewState: Equatable {
 
   static func resolve(
     hasOverview: Bool, isCurrent: Bool, pending: Int = 0, failedRecordings: Int = 0,
-    generating: Bool = false, queued: Bool = false, failed: Bool = false, available: Bool = true,
+    generating: Bool = false, queued: Bool = false, failed: Bool = false,
     recordingStage: String? = nil, queuedRecordings: Int = 0, paused: Bool = false,
     pausing: Bool = false, busy: Bool = false
   ) -> Self {
@@ -21,12 +21,15 @@ enum DayOverviewState: Equatable {
     if paused { return .paused }
     if queuedRecordings > 0 { return .queuedRecordings(queuedRecordings) }
     if queued { return .queued }
-    if !available { return .unconfigured }
-    if failed { return .summaryFailed }
     if failedRecordings > 0 { return .recordingsFailed(failedRecordings) }
+    if failed { return .summaryFailed }
     if pending > 0 { return busy ? .blocked(pending) : .pending(pending) }
     if hasOverview { return .outdated }
     return .missing
+  }
+
+  func withAvailability(_ available: Bool) -> Self {
+    !available && actionTitle != nil ? .unconfigured : self
   }
 
   var message: String? {

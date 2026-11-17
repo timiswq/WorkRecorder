@@ -29,7 +29,7 @@ public struct WorkdayApp: App {
 }
 
 @MainActor final class Lifecycle: NSObject, NSApplicationDelegate {
-  let model = AppModel()
+  let model = AppModel(makeWiFiSync: SceneWindowCapture.wifiSyncFactory)
   private var dockBadge: DockBadgeController?
   func applicationDidFinishLaunching(_ notification: Notification) {
     let capture =

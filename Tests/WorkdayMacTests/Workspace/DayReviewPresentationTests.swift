@@ -29,7 +29,7 @@ final class DayReviewPresentationTests: XCTestCase {
   }
 
   func testMissingConfigurationDoesNotOfferAProcessingAction() {
-    let state = DayOverviewState.resolve(hasOverview: false, isCurrent: false, pending: 1, available: false)
+    let state = DayOverviewState.resolve(hasOverview: false, isCurrent: false, pending: 1).withAvailability(false)
     XCTAssertEqual(state, .unconfigured)
     XCTAssertEqual(state.actionTitle, "设置语音识别")
   }

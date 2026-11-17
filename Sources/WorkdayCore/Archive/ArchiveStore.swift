@@ -34,7 +34,7 @@ public actor ArchiveStore {
     return result.sorted { ($0.startedAt ?? $0.importedAt) > ($1.startedAt ?? $1.importedAt) }
   }
   public func importAudio(
-    _ url: URL, sourceID: String, companionName: String? = nil,
+    _ url: URL, sourceID: String, companionName: String? = nil, volumeUUID: String? = nil,
     transfer: @Sendable (TransferProgress) -> Void = { _ in },
     progress: @Sendable (Double) -> Void = { _ in }
   ) throws -> Recording {
@@ -42,6 +42,7 @@ public actor ArchiveStore {
     guard ["wav", "m4a", "mp3", "aiff", "aif"].contains(url.pathExtension.lowercased()) else {
       throw WorkdayError.invalid("请选择 WAV、M4A、MP3 或 AIFF 文件。设备原始 OPUS 会随同名 WAV 一起保存。")
     }
+    if let volumeUUID { try Files.checkVolume(volumeUUID, at: url) }
     let source = try FileStamp(url)
     let staging = root.appendingPathComponent(".incoming/\(UUID().uuidString)", isDirectory: true)
     try fm.createDirectory(
@@ -99,6 +100,7 @@ public actor ArchiveStore {
       else { throw WorkdayError.invalid("配对 OPUS 尚未保存完整，请稍后同步") }
     }
     guard try FileStamp(url) == source else { throw WorkdayError.invalid("录音文件仍在保存，请稍后同步") }
+    if let volumeUUID { try Files.checkVolume(volumeUUID, at: url) }
     // Cross-transport imports share an immutable archive only after content verification.
     if var existing = try load().first(where: {
       $0.originalName == url.lastPathComponent && $0.sha256 == hash
@@ -160,6 +162,14 @@ public struct FileStamp: Equatable, Sendable {
 }
 
 public enum Files {
+  public static func checkVolume(_ uuid: String, at url: URL) throws {
+    // Recreate the URL so a cached resource value cannot hide a remount at the same path.
+    let fresh = URL(fileURLWithPath: url.path)
+    guard try fresh.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString == uuid else {
+      throw WorkdayError.invalid("挂载位置的设备已变化，请重新连接所选录音卡")
+    }
+  }
+
   public static func digest(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
   }

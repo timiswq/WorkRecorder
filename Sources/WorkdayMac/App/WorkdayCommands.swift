@@ -19,8 +19,10 @@ struct WorkdayCommands: Commands {
       Button("最近的工作记录") { show(.history) }.keyboardShortcut("2")
       Button("设置") { show(.settings) }.keyboardShortcut("3")
       Divider()
-      Button("同步录音卡") { model.retrySync() }.keyboardShortcut("r").disabled(
-        model.usb.volumes.isEmpty || model.importLabel != nil || model.usb.needsSaveConfirmation)
+      let target = model.recorderSyncTarget
+      Button(model.recorderName.map { "同步 \($0) 的录音" } ?? "同步录音") {
+        model.syncRecorder(target)
+      }.keyboardShortcut("r").disabled(target == nil || (model.usesWiFiCard && !model.canUseWiFiSync))
       Button("打开资料库") { model.reveal() }
     }
   }

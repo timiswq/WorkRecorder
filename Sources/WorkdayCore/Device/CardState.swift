@@ -20,12 +20,13 @@ public struct CardState {
   public private(set) var charging = false
   public private(set) var freeBytes: Int64?
   public private(set) var totalBytes: Int64?
+  public private(set) var freeStorageFraction: Double?
   public private(set) var filename: String?
   public private(set) var firmware: String?
   private var starting = false
   private var lastHardwareEvent = Date.distantPast
   public init() {}
-  public mutating func updateWiFi(raw: UInt8, battery: Int?, at date: Date = Date()) {
+  public mutating func updateWiFi(raw: UInt8, battery: Int?, freeStorageFraction: Double? = nil, at date: Date = Date()) {
     // FW925 的状态应答只有 0 能确认空闲。暂停由成功的按键应答确认，非零轮询保留暂停状态。
     let next: Phase
     switch raw {
@@ -38,15 +39,21 @@ public struct CardState {
     if next == .idle { filename = nil }
     confirmedAt = date
     self.battery = battery
+    self.freeStorageFraction = freeStorageFraction
     batteryAt = date
   }
   public mutating func updateWiFi(event: WiFiRecordingEvent, filename: String?, at date: Date = Date()) {
     switch event {
-    case .started, .resumed: setPhase(.recording, at: date)
-    case .paused: setPhase(.paused, at: date)
-    case .ended: setPhase(.idle, at: date)
+    case .started:
+      setPhase(.recording, at: date)
+      self.filename = filename
+    case .ended:
+      setPhase(.idle, at: date)
+      self.filename = nil
+    case .paused, .resumed:
+      setPhase(event == .paused ? .paused : .recording, at: date)
+      if let filename { self.filename = filename }
     }
-    self.filename = event == .ended ? nil : filename ?? self.filename
     confirmedAt = date
   }
   public func isFresh(at date: Date = Date()) -> Bool {
@@ -89,6 +96,7 @@ public struct CardState {
     charging = false
     freeBytes = nil
     totalBytes = nil
+    freeStorageFraction = nil
     firmware = nil
   }
   public mutating func apply(

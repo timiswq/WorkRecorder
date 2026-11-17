@@ -220,6 +220,37 @@ final class WorkspaceTests: XCTestCase {
     await model.shutdown()
   }
 
+  @MainActor func testDayTaskRetriesOnlyFailedRecordingsOnThatDate() async throws {
+    let root = try makeRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = AppModel(libraryURL: root.appendingPathComponent("Library"), inference: WorkspaceInference())
+    model.preferences.autoOrganize = false
+    let day = "2026-11-11"
+    for stamp in ["20261111-090000", "20261111-100000", "20261111-110000", "20261110-090000"] {
+      try await add("note" + stamp + ".wav", to: model, at: root)
+    }
+    await model.reload()
+    let untouched = try XCTUnwrap(model.recordings.first { $0.originalName == "note20261111-110000.wav" })
+    for recording in model.recordings where recording.id != untouched.id {
+      var doc = ProcessingDocument(recording: recording, model: "fixture")
+      doc.phase = "failed"
+      doc.error = "处理失败"
+      model.documents[recording.id] = doc
+    }
+    let row = try XCTUnwrap(model.statusPresentation(at: Date()).activities.first { $0.day == day })
+    XCTAssertEqual(row.action, .retryRecordings(day))
+    XCTAssertTrue(row.title.hasSuffix("2 段录音处理失败"))
+    XCTAssertTrue(row.detail.contains("另有 1 段录音待处理"))
+    model.performStatusAction(try XCTUnwrap(row.action))
+    try await finish(model)
+    XCTAssertNil(model.documents[untouched.id])
+    let previousDay = try XCTUnwrap(model.recordings.first { $0.day != day })
+    XCTAssertEqual(model.documents[previousDay.id]?.phase, "failed")
+    XCTAssertEqual(model.documents.values.filter { $0.phase == "complete" }.count, 2)
+    XCTAssertEqual(model.statusPresentation(at: Date()).activities.first { $0.day == day }?.action, .processDay(day))
+    await model.shutdown()
+  }
+
   @MainActor func testFailedSummaryRetryButtonQueuesOnceWhileAnotherDateIsBusy() async throws {
     let root = try makeRoot()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -238,6 +269,13 @@ final class WorkspaceTests: XCTestCase {
     try await finish(model)
     XCTAssertTrue(model.summaryErrors[day]?.contains("HTTP 400") == true)
     XCTAssertEqual(model.summaries[day]?.overview, previous.overview)
+    let rows = model.statusPresentation(at: Date()).activities.filter { $0.day == day }
+    XCTAssertEqual(rows.count, 1)
+    let failed = try XCTUnwrap(rows.first)
+    XCTAssertTrue(failed.title.hasSuffix("概述生成失败"))
+    XCTAssertFalse(failed.title.contains("录音已转写"))
+    XCTAssertTrue(failed.detail.contains("1 段录音待转写"))
+    XCTAssertEqual(failed.action, .summary(day))
 
     let other = try XCTUnwrap(model.recordings.first { $0.day != day })
     await service.blockTranscription()
@@ -277,6 +315,10 @@ final class WorkspaceTests: XCTestCase {
     let saved = try await model.store.summary(day: day)
     XCTAssertEqual(saved?.overview, "验证摘要")
     XCTAssertEqual(saved?.recordingIDs.count, 1)
+    let next = try XCTUnwrap(model.statusPresentation(at: Date()).activities.first { $0.day == day })
+    XCTAssertEqual(next.id, failed.id)
+    XCTAssertTrue(next.title.hasSuffix("1 段录音待转写"))
+    XCTAssertEqual(next.action, .processDay(day))
     let transcribed = await service.transcriptionCount
     let requests = await service.summaryDays.filter { $0 == day }
     XCTAssertEqual(transcribed, 2, "重试摘要不能启动新的录音转写")

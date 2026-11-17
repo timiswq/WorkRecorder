@@ -41,9 +41,94 @@ public struct AppleCaptionPhrases {
   private var published: [Int: ASREvent] = [:]
   private var confirmedThrough = -Double.infinity
   private var previousRange: Range<Double>?
+  private var draftTiming = DraftTiming()
   public private(set) var bubblePhrases: [Int: AppleBubblePhrase] = [:]
   private var continuations = Set<Int>()
   private var drafts: [Int: BubbleDraft] = [:]
+
+  /// Fast results may time the entire growing hypothesis as a single run. A
+  /// sentence mark added after the words have stopped advancing gives us a
+  /// boundary even if the next revision takes that mark away.
+  private struct DraftTiming {
+    private var rangeStart: Double?
+    private var lastText = ""
+    private var unchangedSince = 0.0
+    private var ends: [(prefix: String, time: Double)] = []
+    private static let sentenceEnds = "。！？!?"
+
+    mutating func resolve(_ words: [ASRWord], range: Range<Double>?, final: Bool)
+      -> (words: [ASRWord], pauses: [Double]) {
+      if rangeStart != range?.lowerBound {
+        self = DraftTiming()
+        rangeStart = range?.lowerBound
+      }
+      defer { if final { self = DraftTiming() } }
+      guard let range, words.count == 1, let word = words.first,
+            word.startMs == range.lowerBound, word.endMs == range.upperBound
+      else { return (words, []) }
+
+      let content = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      let terminal = content.last.map { Self.sentenceEnds.contains($0) } ?? false
+      let priorText = lastText
+      let prefix = terminal ? String(content.dropLast()) : content
+      if prefix != lastText {
+        lastText = prefix
+        unchangedSince = word.endMs
+      } else if terminal, !prefix.isEmpty, word.endMs - unchangedSince >= AppleCaptionPhrases.pauseMs,
+                ends.last.map({ prefix != $0.prefix && unchangedSince > $0.time }) ?? true {
+        ends.append((prefix, (unchangedSince + word.endMs) / 2))
+      }
+      guard !ends.isEmpty else { return (words, []) }
+      var start = word.text.startIndex
+      var startMs = word.startMs
+      var pieces: [ASRWord] = []
+      var pauses: [Double] = []
+      let spoken = word.text.drop(while: \.isWhitespace)
+      for i in ends.indices {
+        let end = ends[i]
+        guard startMs < end.time, end.time < word.endMs else { break }
+        // A temporarily retracted hypothesis still belongs before its old cut.
+        if !final, end.prefix.hasPrefix(content) {
+          pieces.append(ASRWord(text: String(word.text[start...]), startMs: startMs, endMs: end.time))
+          return (pieces, pauses)
+        }
+        guard var split = Self.boundary(after: end.prefix, in: spoken, from: max(start, spoken.startIndex),
+                                        previous: priorText) else { break }
+        guard split > start else { break }
+        ends[i].prefix = String(spoken[..<split])
+        while split < word.text.endIndex, Self.sentenceEnds.contains(word.text[split]) {
+          split = word.text.index(after: split)
+        }
+        guard word.text[split...].contains(where: { !$0.isPunctuation && !$0.isWhitespace }) else { break }
+        pieces.append(ASRWord(text: String(word.text[start..<split]), startMs: startMs, endMs: end.time))
+        pauses.append(end.time)
+        start = split
+        startMs = end.time
+      }
+      pieces.append(ASRWord(text: String(word.text[start...]), startMs: startMs, endMs: word.endMs))
+      return (pieces, pauses)
+    }
+
+    private static func boundary(after prefix: String, in text: Substring, from start: String.Index,
+                                 previous: String) -> String.Index? {
+      if text.hasPrefix(prefix) { return text.index(text.startIndex, offsetBy: prefix.count) }
+      // A revision can change words on the left while it appends on the right.
+      // Prefer an explicit sentence ending, or align to the surviving right text.
+      guard previous.hasPrefix(prefix) else { return nil }
+      if let mark = text[start...].firstIndex(where: { sentenceEnds.contains($0) }),
+         prefix.count >= 2, text[..<mark].hasSuffix(prefix.suffix(2)) { return mark }
+      let suffix = previous.dropFirst(prefix.count).drop(while: { sentenceEnds.contains($0) })
+      guard suffix.count >= 2 else { return nil }
+      let anchor = String(suffix.prefix(6))
+      guard let match = text[start...].range(of: anchor), match.lowerBound > start,
+            text[match.upperBound...].range(of: anchor) == nil else { return nil }
+      var split = match.lowerBound
+      while split > text.startIndex, sentenceEnds.contains(text[text.index(before: split)]) {
+        split = text.index(before: split)
+      }
+      return split
+    }
+  }
 
   /// Apple may attach one time range to an entire growing Chinese phrase.
   /// Track the read position in the hypothesis separately from the text on screen.
@@ -150,7 +235,8 @@ public struct AppleCaptionPhrases {
                               finalizedThrough: Double? = nil) -> [ASREvent] {
     if words.isEmpty && published.isEmpty && firstID == 0 { bubblePhrases.removeAll() }
     let previousEnd = words.last?.word.endMs ?? -Double.infinity
-    let fresh = input.flatMap(Self.sentenceRuns).map { TimedWord($0, in: range) }
+    let timed = draftTiming.resolve(input, range: range, final: final)
+    let fresh = timed.words.flatMap(Self.sentenceRuns).map { TimedWord($0, in: range) }
     if let range {
       // A final can move the first token forward or shorten the last draft.
       // Replace its previous extent as well when it completes that hypothesis.
@@ -181,7 +267,8 @@ public struct AppleCaptionPhrases {
     if let watermark = finalizedThrough ?? (final ? resultEnd : nil), watermark.isFinite {
       confirmedThrough = max(confirmedThrough, watermark)
     }
-    return render(pauses: pauses, previousEnd: previousEnd, finishing: false)
+    return render(pauses: timed.pauses.isEmpty ? pauses : (pauses + timed.pauses).sorted(),
+                  previousEnd: previousEnd, finishing: false)
   }
 
   public mutating func finish() -> [ASREvent] {

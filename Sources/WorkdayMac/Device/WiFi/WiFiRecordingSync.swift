@@ -15,6 +15,10 @@ import WorkdayCore
   @Published private(set) var pending: Int?
   @Published private(set) var failedImports = 0
   var busy: Bool { phase != .idle }
+  var connectedDeviceID: String? {
+    guard phase == .listing || phase == .downloading, transfer.connected else { return nil }
+    return device
+  }
   var usingNetwork: Bool {
     [.hotspot, .joining, .permission, .listing, .downloading, .restoring].contains(phase)
   }

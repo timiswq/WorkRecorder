@@ -8,7 +8,7 @@ final class ConversationSelectionTests: XCTestCase {
     TranscriptLine(id: id, start: Double(index * 2), end: Double(index * 2 + 1), text: "测试句\(index)")
   }
   private func service(_ fixture: String) -> AIService {
-    let service = AIService(key: "test-key", host: "\(fixture).cn-beijing.maas.aliyuncs.com")
+    let service = AIService(key: "test-\(fixture)")
     service.sessionConfiguration.protocolClasses = [SelectionResponse.self]
     return service
   }
@@ -111,7 +111,8 @@ private final class SelectionResponse: URLProtocol {
     let url = request.url!
     let body = request.testBody
     let topic = #"{"title":"验收","summary":"确认验收安排","decisions":[],"tasks":["周五验收"]}"#
-    let fixture = url.host?.components(separatedBy: ".").first
+    XCTAssertEqual(url.absoluteString, "https://esp.xkw.cn/ai/v1/chat/completions")
+    let fixture = String((request.value(forHTTPHeaderField: "Authorization") ?? "").dropFirst("Bearer test-".count))
     let selection: String
     let isLabeling = String(decoding: body, as: UTF8.self).contains("逐句标注")
     if fixture == "seven" {

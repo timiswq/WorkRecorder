@@ -11,16 +11,34 @@ final class ProcessingPresentationTests: XCTestCase {
     defer { model.pauseProcessing(); try? FileManager.default.removeItem(at: root) }
     model.selectDay("2026-11-13")
     XCTAssertEqual(model.dayOverviewState(for: "2026-11-13"), .pending(2))
-    XCTAssertEqual(model.statusPresentation(at: Date()).activities.first { $0.id == "processing" }?.state, .needsAction)
+    func row(_ day: String) throws -> StatusActivity {
+      let rows = model.statusPresentation(at: Date()).activities.filter { $0.day == day }
+      XCTAssertEqual(rows.count, 1)
+      return try XCTUnwrap(rows.first)
+    }
+    let day = "2026-11-13"
+    let manual = try row(day)
+    XCTAssertEqual(manual.state, .manual)
+    XCTAssertTrue(manual.title.hasSuffix("2 段录音待转写"))
+    XCTAssertEqual(manual.actionLabel, "开始转写")
+    XCTAssertEqual(manual.action, .processDay(day))
+    XCTAssertFalse(model.statusPresentation(at: Date()).hasWarning)
     try await capture(model, name: "processing-manual")
-    model.requestDayProcessing("2026-11-13")
+    model.performStatusAction(try XCTUnwrap(manual.action))
     for _ in 0..<300 where model.processingID == nil { try await Task.sleep(for: .milliseconds(10)) }
     XCTAssertEqual(model.dayOverviewState(for: "2026-11-13"), .processingRecordings("正在转写录音"))
     XCTAssertNil(model.dayOverviewState(for: "2026-11-13").actionTitle)
+    let running = try row(day)
+    XCTAssertEqual(running.id, manual.id)
+    XCTAssertEqual(running.state, .working)
+    XCTAssertNil(running.action)
     try await capture(model, name: "processing-running")
     XCTAssertEqual(model.dayOverviewState(for: "2026-11-14"), .blocked(1))
-    model.requestDayProcessing("2026-11-14")
-    model.requestDayProcessing("2026-11-14")
+    let enqueue = try XCTUnwrap(try row("2026-11-14").action)
+    model.performStatusAction(enqueue)
+    model.performStatusAction(enqueue)
+    XCTAssertEqual(try row("2026-11-14").state, .waiting)
+    XCTAssertNil(try row("2026-11-14").action)
     XCTAssertEqual(model.queuedRecordingRetries.count, 1, "重复点击不能重复提交任务")
     XCTAssertEqual(model.dayOverviewState(for: "2026-11-14"), .queuedRecordings(1))
     XCTAssertNil(model.dayOverviewState(for: "2026-11-14").actionTitle)
@@ -31,6 +49,7 @@ final class ProcessingPresentationTests: XCTestCase {
     XCTAssertFalse(model.processingIsRunning)
     XCTAssertTrue(model.summaryIsCurrent("2026-11-13"))
     XCTAssertTrue(model.summaryIsCurrent("2026-11-14"), "队列中的日期完成录音后也须生成概述")
+    XCTAssertEqual(model.statusPresentation(at: Date()).activities.compactMap(\.day), ["2026-11-15"])
     let untouched = model.recordings.first { $0.day == "2026-11-15" }
     XCTAssertNotNil(untouched)
     XCTAssertNil(untouched.flatMap { model.documents[$0.id] }, "不能启动未授权日期的工作")

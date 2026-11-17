@@ -84,6 +84,7 @@ final class StatusPresentationTests: XCTestCase {
     model.documents["record"] = document
     model.error = "云端整理失败"
     let status = model.statusPresentation(at: Date())
+    XCTAssertFalse(status.activities.contains { $0.id == "caption" })
     XCTAssertEqual(status.hardware.kind, .recording)
     XCTAssertFalse(status.hardware.warning)
     XCTAssertEqual(status.attention.count, 1)
@@ -112,17 +113,17 @@ final class StatusPresentationTests: XCTestCase {
     let model = isolated()
     model.recordings = [recording()]
     let status = model.statusPresentation(at: Date())
-    let processing = status.activities.first { $0.id == "processing" }
-    XCTAssertEqual(processing?.state, .needsAction, "尚需设置时不能显示成会自动开始的等待任务")
+    let processing = status.activities.first { $0.day == "2026-11-13" }
+    XCTAssertEqual(processing?.state, .manual, "尚需设置时不能显示成会自动开始的等待任务")
     XCTAssertEqual(processing?.action, .recognitionSettings)
-    XCTAssertTrue(processing?.detail.contains("录音文件已保存") == true)
+    XCTAssertTrue(processing?.title.contains("1 段录音待转写") == true)
     XCTAssertFalse(status.hardware.warning)
     model.documents["record"] = ProcessingDocument(recording: model.recordings[0], model: "test")
     model.processingID = "record"
     model.processingLabel = "正在转写"
-    XCTAssertEqual(model.statusPresentation(at: Date()).activities.first { $0.id == "processing" }?.state, .working)
+    XCTAssertEqual(model.statusPresentation(at: Date()).activities.first { $0.day == "2026-11-13" }?.state, .working)
     model.pauseProcessing()
-    XCTAssertEqual(model.statusPresentation(at: Date()).activities.first { $0.id == "processing" }?.action, .processing)
+    XCTAssertEqual(model.statusPresentation(at: Date()).activities.first { $0.day == "2026-11-13" }?.action, .recognitionSettings)
   }
 
   @MainActor func testDismissingOneNoticePreservesFailuresAndOtherNotices() {
@@ -140,7 +141,7 @@ final class StatusPresentationTests: XCTestCase {
     XCTAssertEqual(visibility.firstVisible(in: original.notices)?.message, "整理失败")
   }
 
-  @MainActor func testFailedRecordingRemainsActionableWhileAnotherRecordingIsProcessing() {
+  @MainActor func testFailedRecordingIsReportedInTheActiveRowForTheSameDay() {
     let model = isolated()
     let failed = recording()
     var active = failed
@@ -152,8 +153,10 @@ final class StatusPresentationTests: XCTestCase {
     model.documents[failed.id] = document
     model.processingID = active.id
     let status = model.statusPresentation(at: Date())
-    XCTAssertTrue(status.activities.contains { $0.id == "processing" && $0.isWorking })
-    XCTAssertEqual(status.attention.first?.action, .originals, "后台任务继续执行时，失败项仍有独立入口")
+    XCTAssertTrue(status.activities.contains { $0.day == "2026-11-13" && $0.isWorking })
+    XCTAssertEqual(status.activities.count, 1)
+    XCTAssertNil(status.activities.first?.action)
+    XCTAssertTrue(status.activities.first?.detail.contains("另有 1 段处理失败") == true)
   }
 
   @MainActor private func isolated() -> AppModel {
@@ -162,7 +165,7 @@ final class StatusPresentationTests: XCTestCase {
   }
 
   private func recording() -> Recording {
-    .init(id: "record", importedAt: Date(), originalName: "note20261113-090000.wav", folder: "record",
+    .init(id: "record", startedAt: WorkspaceDate.date("2026-11-13"), importedAt: Date(), originalName: "note20261113-090000.wav", folder: "record",
           originalFile: "original.wav", sha256: "test", bytes: 100, duration: 60, sourceID: "usb:test")
   }
 }

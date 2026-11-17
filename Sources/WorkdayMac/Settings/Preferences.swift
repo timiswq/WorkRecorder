@@ -3,6 +3,8 @@ import Security
 import WorkdayCore
 
 struct Preferences: Codable {
+  var usbOnlyVolumeID: String?
+  var usbOnlyVolumeName: String?
   var boundID: String?
   var boundName = "未绑定录音卡"
   var recorderKind = RecorderKind.usb
@@ -16,28 +18,23 @@ struct Preferences: Codable {
   var cloudEnabled = false
   var realtime = true
   var liveModel: LiveASRModel = .streaming
-  var recordingModel: RecordingASRModel = .flash31
   var theme = "system"
   var captions = CaptionPreferences()
-  var workspaceID = ""
   var libraryPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
     "Documents/工作留声"
   ).path
-  var host: String {
-    workspaceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-      ? "dashscope.aliyuncs.com"
-      : "\(workspaceID.trimmingCharacters(in: .whitespacesAndNewlines)).cn-beijing.maas.aliyuncs.com"
-  }
   init() {}
   private enum CodingKeys: String, CodingKey {
     case boundID, boundName, autoConnect, autoSync, autoOrganize, cloudEnabled, realtime
-    case recorderKind, wifiBoundID, wifiBoundName
-    case liveModel, recordingModel, theme, captions, workspaceID, libraryPath
+    case recorderKind, wifiBoundID, wifiBoundName, usbOnlyVolumeID, usbOnlyVolumeName
+    case liveModel, theme, captions, libraryPath
   }
   init(from decoder: Decoder) throws {
     self.init()
     let values = try decoder.container(keyedBy: CodingKeys.self)
     recorderKind = try values.decodeIfPresent(RecorderKind.self, forKey: .recorderKind) ?? .usb
+    usbOnlyVolumeID = try values.decodeIfPresent(String.self, forKey: .usbOnlyVolumeID)
+    usbOnlyVolumeName = try values.decodeIfPresent(String.self, forKey: .usbOnlyVolumeName)
     wifiBoundID = try values.decodeIfPresent(String.self, forKey: .wifiBoundID)
     wifiBoundName = try values.decodeIfPresent(String.self, forKey: .wifiBoundName)
     boundID = try values.decodeIfPresent(String.self, forKey: .boundID)
@@ -47,11 +44,12 @@ struct Preferences: Codable {
     autoOrganize = try values.decodeIfPresent(Bool.self, forKey: .autoOrganize) ?? autoOrganize
     cloudEnabled = try values.decodeIfPresent(Bool.self, forKey: .cloudEnabled) ?? cloudEnabled
     realtime = try values.decodeIfPresent(Bool.self, forKey: .realtime) ?? realtime
-    liveModel = (try? values.decode(LiveASRModel.self, forKey: .liveModel)) ?? liveModel
-    recordingModel = (try? values.decode(RecordingASRModel.self, forKey: .recordingModel)) ?? recordingModel
+    if let saved = try? values.decode(String.self, forKey: .liveModel) {
+      // Carry the former file-review preference forward to ESP sentence review.
+      liveModel = saved == "qwen-audio-3.1-asr-flash-filetrans" ? .segment : LiveASRModel(rawValue: saved) ?? .streaming
+    }
     theme = try values.decodeIfPresent(String.self, forKey: .theme) ?? theme
     captions = try values.decodeIfPresent(CaptionPreferences.self, forKey: .captions) ?? captions
-    workspaceID = try values.decodeIfPresent(String.self, forKey: .workspaceID) ?? workspaceID
     libraryPath = try values.decodeIfPresent(String.self, forKey: .libraryPath) ?? libraryPath
   }
   private static let storageKey = "WorkdayPreferences"
@@ -63,11 +61,13 @@ struct Preferences: Codable {
       guard let data = defaults.data(forKey: storageKey) else { return Self() }
       return (try? JSONDecoder().decode(Self.self, from: data)) ?? Self()
     }
-    // The old app used a different bundle identifier. Import its settings once.
+    // Import only settings supported by this version into the new preferences domain.
     guard let data = defaults.persistentDomain(forName: legacyDomain)?[storageKey] as? Data,
       let preferences = try? JSONDecoder().decode(Self.self, from: data)
     else { return Self() }
-    defaults.set(data, forKey: storageKey)
+    if let migrated = try? JSONEncoder().encode(preferences) {
+      defaults.set(migrated, forKey: storageKey)
+    }
     return preferences
   }
   func save() {
@@ -81,7 +81,7 @@ enum Credentials {
   private static var query: [String: Any] {
     [
       kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: "cn.workday.recorder", kSecAttrAccount as String: "dashscope",
+      kSecAttrService as String: "cn.workday.recorder", kSecAttrAccount as String: "esp",
     ]
   }
   static func load() -> String? {

@@ -13,8 +13,8 @@ final class MenuBarPanelTests: XCTestCase {
     let presentation = StatusPresentation(
       hardware: .init(kind: .recording, title: "正在录音", detail: "蓝牙已连接"),
       hardwareAction: .live, caption: caption,
-      activities: [.init(id: "summary:2026-11-14", title: "11月14日概述待重试", detail: "",
-        state: .needsAction, action: .summary("2026-11-14")), caption], notices: [])
+      activities: [.init(id: "day:2026-11-14", title: "11月14日概述待重试", detail: "",
+        state: .needsAction, action: .summary("2026-11-14"), day: "2026-11-14"), caption], notices: [])
     let summary = MenuBarTaskSummary(presentation)
     XCTAssertEqual(summary.attentionCount, 2)
     XCTAssertEqual(summary.detail, "实时字幕暂不可用")
@@ -32,6 +32,33 @@ final class MenuBarPanelTests: XCTestCase {
     XCTAssertEqual(model.summaryErrors["2026-11-14"], "示例概述错误")
     XCTAssertNil(model.processingID)
     XCTAssertFalse(model.processingIsRunning)
+  }
+
+  @MainActor func testMenuIdentityTracksConnectionAndDropsDisconnectedBattery() {
+    let model = makeModel()
+    XCTAssertNil(model.recorderName)
+    model.card.name = "FW925"
+    model.card.state.connected = true
+    model.card.onWiFiBound?("A", "FW925")
+    model.card.receiveWiFiState(0, battery: 64)
+    let status = model.deviceStatus(at: Date())
+    XCTAssertEqual(status.namedTitle, "FW925 · 未录音")
+    XCTAssertEqual(model.recorderConnectionDetail(status), "蓝牙已连接 · 电量 64%")
+    let menu = MenuBarLabelState(status)
+    XCTAssertEqual(menu.content.title, status.namedTitle)
+    model.card.disconnect()
+    let offline = model.deviceStatus(at: Date())
+    menu.update(offline)
+    XCTAssertNil(offline.battery)
+    XCTAssertEqual(menu.content.title, "FW925 · 未连接")
+    model.card.onWiFiBound?("B", "会议室")
+    menu.update(model.deviceStatus(at: Date()))
+    XCTAssertEqual(menu.content.title, "会议室 · 未连接")
+    XCTAssertEqual(model.recorderSyncTarget, .wifi("B"))
+    model.wifiSync.retryLocal()
+    XCTAssertNil(model.recorderSyncTarget)
+    model.showRecorderPicker()
+    XCTAssertFalse(model.showsRecorderPicker)
   }
 
   @MainActor func testOpeningMainPreservesTheExistingWorkspace() {

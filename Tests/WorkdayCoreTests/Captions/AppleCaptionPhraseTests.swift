@@ -73,6 +73,53 @@ final class AppleCaptionPhraseTests: XCTestCase {
     XCTAssertEqual(phrases.finish(), [.sentence(id: 1, text: "下一项", isFinal: true, startMs: 2300, endMs: 2800)])
   }
 
+  func testDelayedSentenceMarkSeparatesLiveRowsEvenWhenTheNextDraftRetractsIt() {
+    var phrases = AppleCaptionPhrases()
+    func draft(_ text: String, through end: Double) -> [ASREvent] {
+      phrases.update([word(text, 0, end)], final: false, replacing: 0..<end)
+    }
+    _ = draft("下午开会", through: 3900)
+    _ = draft("下午开会。", through: 4800)
+    XCTAssertNil(phrases.bubblePhrases[1])
+    XCTAssertEqual(draft("下午开会请把会议纪要", through: 6800), [
+      .sentence(id: 0, text: "下午开会", isFinal: false, startMs: 0, endMs: 4350),
+      .sentence(id: 1, text: "请把会议纪要", isFinal: false, startMs: 4350, endMs: 6800),
+    ])
+    _ = phrases.update([word("下午开会。", 1900, 3600), word("请把会议纪要给我。", 4550, 8100)],
+      final: true, replacing: 1900..<8100, finalizedThrough: 8100)
+    XCTAssertEqual(phrases.finish(), [
+      .sentence(id: 1, text: "请把会议纪要给我。", isFinal: true, startMs: 4550, endMs: 8100)
+    ])
+  }
+
+  func testBriefHesitationAndDelayedCommaKeepOneLiveRow() {
+    for (mark, delay) in [("。", 350.0), ("，", 1200.0), (":", 1000.0)] {
+      var phrases = AppleCaptionPhrases()
+      for (text, end) in [("今天下午", 2000.0), ("今天下午" + mark, 2000 + delay),
+                          ("今天下午三点开会", 4500.0)] {
+        _ = phrases.update([word(text, 0, end)], final: false, replacing: 0..<end)
+      }
+      XCTAssertEqual(phrases.finish(), [
+        .sentence(id: 0, text: "今天下午三点开会", isFinal: true, startMs: 0, endMs: 4500)
+      ])
+    }
+  }
+
+  func testRevisedFirstSentenceKeepsTheSecondRowWhenLeftWordsChange() {
+    var phrases = AppleCaptionPhrases()
+    func draft(_ text: String, through end: Double) -> [ASREvent] {
+      phrases.update([word(text, 0, end)], final: false, replacing: 0..<end)
+    }
+    _ = draft("周四开会", through: 1200)
+    _ = draft("周四开会。", through: 2200)
+    _ = draft("周五开会。整理纪要", through: 3200)
+    let revision = draft("周五参会整理纪要明早发", through: 4100)
+    XCTAssertEqual(revision, [
+      .sentence(id: 0, text: "周五参会", isFinal: false, startMs: 0, endMs: 1700),
+      .sentence(id: 1, text: "整理纪要明早发", isFinal: false, startMs: 1700, endMs: 4100),
+    ])
+  }
+
   func testTimedRevisionsKeepWordsOutsideTheReplacedInterval() {
     var phrases = AppleCaptionPhrases()
     _ = phrases.update([word("开始", 0, 200)], final: false, replacing: 0..<200)

@@ -460,16 +460,27 @@ final class WorkspaceWindowTests: XCTestCase {
     stream.onEvent?(.sentence(id: 102, text: "我们先核对新版包装上的型号和交付日期，随后联系仓库安排发货。请把负责人的姓名也记下来，明天上午确认收件地址后，我们再把更新后的时间同步给大家。", isFinal: false))
     try await capture("字幕-最低宽度草稿", 690, 510, dark: true)
     // Switch to an independently rendered settings surface; no settings or credentials are saved.
+    func captureSettings(_ name: String) throws {
+      let settings = NSHostingView(rootView: SettingsView(model: model))
+      settings.frame = NSRect(x: 0, y: 0, width: 740, height: 670)
+      settings.layoutSubtreeIfNeeded()
+      let bitmap = try XCTUnwrap(settings.bitmapImageRepForCachingDisplay(in: settings.bounds))
+      settings.cacheDisplay(in: settings.bounds, to: bitmap)
+      let path = URL(fileURLWithPath: output).appendingPathComponent("workspace-settings-\(name).png")
+      try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: path)
+    }
     model.settingsSection = .recognition
-    let settings = NSHostingView(rootView: SettingsView(model: model))
-    settings.frame = NSRect(x: 0, y: 0, width: 740, height: 670)
-    settings.layoutSubtreeIfNeeded()
-    let bitmap = try XCTUnwrap(settings.bitmapImageRepForCachingDisplay(in: settings.bounds))
-    settings.cacheDisplay(in: settings.bounds, to: bitmap)
-    try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-      .write(
-        to: URL(fileURLWithPath: output).appendingPathComponent(
-          "workspace-settings-recognition.png"))
+    try captureSettings("recognition")
+    model.settingsSection = .device
+    model.usb.volumes = []
+    model.card.name = "测试录音卡 A"
+    model.card.state.connected = true
+    model.card.status = "蓝牙已连接"
+    try captureSettings("connected")
+    model.card.disconnect()
+    try captureSettings("disconnected")
+    model.card.choices = [CardChoice(id: UUID(), name: "测试录音卡 B", rssi: -50, kind: .wifi)]
+    try captureSettings("new-card")
     XCTAssertFalse(focus.activatedTestApplication)
   }
 }

@@ -231,8 +231,8 @@ extension RandomAccessCollection where Element == CaptionRecord, Index == Int {
   }
 
   func retryReview(_ record: CaptionRecord) {
-    guard reviewer != nil, case .failed(let taskID) = record.fileReview,
-          setReview(taskID.map(CaptionFileReview.submitted) ?? .queued, for: record) else { return }
+    guard reviewer != nil, case .failed = record.fileReview,
+          setReview(.queued, for: record) else { return }
     startReviewWorker()
   }
 
@@ -241,27 +241,19 @@ extension RandomAccessCollection where Element == CaptionRecord, Index == Int {
     reviewWorker = Task { [weak self] in
       while !Task.isCancelled, let self {
         let start = CaptionWindow(now: clock()).start
-        guard var record = records[records.firstIndex(atOrAfter: start)...].first(where: { $0.fileReview?.pending == true })
+        guard let record = records[records.firstIndex(atOrAfter: start)...].first(where: { $0.fileReview?.pending == true })
         else { break }
-        var taskID: String?
         do {
-          if case .submitted(let id) = record.fileReview {
-            taskID = id
-          } else {
-            let wav = try await replayAudio(for: record)
-            guard !Task.isCancelled, reviewIndex(for: record) != nil else { continue }
-            let id = try await reviewer.submitCaption(wav: wav)
-            guard !Task.isCancelled, setReview(.submitted(id), for: record) else { continue }
-            taskID = id
-            record.fileReview = .submitted(id)
-          }
-          guard let taskID else { continue }
-          let text = try await reviewer.captionResult(taskID: taskID)
+          // A submitted ID in an older library belongs to the previous provider.
+          // ESP accepts the locally cached audio and returns the result in the same request.
+          let wav = try await replayAudio(for: record)
+          guard !Task.isCancelled, reviewIndex(for: record) != nil else { continue }
+          let text = try await reviewer.transcribeCaption(wav: wav)
           guard !Task.isCancelled else { break }
           _ = setReview(LiveLine.containsSpeech(text) ? .complete(text) : .noSpeech, for: record)
         } catch {
           guard !Task.isCancelled else { break }
-          _ = setReview(.failed(taskID: error is FileTransTaskFailed ? nil : taskID), for: record)
+          _ = setReview(.failed(taskID: nil), for: record)
         }
       }
       if !Task.isCancelled { self?.reviewWorker = nil }

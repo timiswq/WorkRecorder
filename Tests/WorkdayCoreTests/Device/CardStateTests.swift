@@ -4,6 +4,20 @@ import XCTest
 @testable import WorkdayCore
 
 final class CardStateTests: XCTestCase {
+  func testWiFiStorageSurvivesRecordingEventsAndClearsOnDisconnect() {
+    var card = CardState()
+    card.connected = true
+    card.updateWiFi(raw: 1, battery: 80, freeStorageFraction: 0.75)
+    card.updateWiFi(event: .started, filename: "20261117103000")
+    card.updateWiFi(event: .paused, filename: nil)
+    XCTAssertEqual(card.filename, "20261117103000")
+    XCTAssertEqual(card.freeStorageFraction, 0.75)
+    card.updateWiFi(event: .started, filename: nil)
+    XCTAssertNil(card.filename, "新录音尚未上报文件名时不能展示上一段录音")
+    card.disconnect()
+    XCTAssertNil(card.freeStorageFraction)
+  }
+
   func frame(_ bytes: [UInt8]) -> Frame {
     var parser = FrameParser()
     return parser.push(Wire.frame(bytes, seq: 0))[0]

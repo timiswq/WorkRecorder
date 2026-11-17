@@ -52,16 +52,10 @@ public actor ProcessingPipeline {
       try await store.document(for: recording)
       ?? ProcessingDocument(recording: recording, model: service.transcriptionModel)
     if document.phase == "complete" { return document }
-    // Resume the same recognizer for every chunk of a recording, including after a relaunch.
-    var service = service
-    if document.model != service.transcriptionModel, var cloud = service as? AIService,
-       let savedModel = RecordingASRModel(rawValue: document.model) {
-      if document.completedChunks == 0 && document.transcript.isEmpty {
-        document.model = cloud.transcriptionModel
-      } else {
-        cloud.recordingModel = savedModel
-        service = cloud
-      }
+    // ESP can resume a legacy Flash 3.0 recording using its existing transcription checkpoint.
+    if service is AIService, document.model == "qwen-audio-3.0-asr-flash" {
+      document.legacyFlash30Chunks = document.completedChunks
+      document.model = service.transcriptionModel
     }
     do {
       guard try Files.hash(original) == recording.sha256 else {

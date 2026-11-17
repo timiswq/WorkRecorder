@@ -5,12 +5,12 @@ import WorkdayCore
 /// Shared by the workspace, device page and menu bar. Hardware facts never depend on AI or copy errors.
 enum StatusAction: Equatable {
   case sync(CardSyncPresentation.Action), bind, reconnect, refreshCard, bluetoothSettings
-  case originals, live, processing, pauseProcessing, recognitionSettings, captionSettings, retryCaptions
+  case originals, live, processDay(String), retryRecordings(String), recognitionSettings, captionSettings, retryCaptions
   case retryImport, device, summary(String)
 
   var isSecondary: Bool {
     switch self {
-    case .originals, .live, .device, .pauseProcessing: return true
+    case .originals, .live, .device: return true
     default: return false
     }
   }
@@ -18,26 +18,26 @@ enum StatusAction: Equatable {
   var title: String {
     switch self {
     case .sync(let action): return action.rawValue
-    case .bind: return "绑定录音卡…"
+    case .bind: return "选择录音卡…"
     case .reconnect: return "重新连接"
     case .refreshCard: return "重新查询状态"
     case .bluetoothSettings: return "打开系统设置…"
     case .originals: return "查看原始录音"
     case .live: return "查看实时字幕"
-    case .processing: return "开始处理"
-    case .pauseProcessing: return "暂停后台处理"
+    case .processDay: return "开始处理"
+    case .retryRecordings: return "重试处理"
     case .recognitionSettings: return "设置语音识别"
     case .captionSettings: return "字幕设置"
     case .retryCaptions: return "重试本机识别"
     case .retryImport: return "重试导入"
     case .device: return "查看录音卡"
-    case .summary: return "重新生成概述"
+    case .summary: return "生成概述"
     }
   }
 }
 
 struct StatusActivity: Identifiable {
-  enum State { case working, needsAction, waiting, complete, information }
+  enum State { case working, needsAction, manual, waiting, complete, information }
   let id: String
   let title: String
   let detail: String
@@ -45,6 +45,8 @@ struct StatusActivity: Identifiable {
   var action: StatusAction?
   var error: String?
   var actionLabel: String? = nil
+  var day: String?
+  var requiresAction: Bool { state == .needsAction || state == .manual }
   var isWorking: Bool { state == .working }
 }
 
@@ -70,9 +72,12 @@ struct StatusPresentation {
   let caption: StatusActivity
   let activities: [StatusActivity]
   let notices: [StatusNotice]
-  var attention: [StatusActivity] { activities.filter { $0.state == .needsAction } }
+  var attention: [StatusActivity] { activities.filter(\.requiresAction) }
+  var hasWarning: Bool { activities.contains { $0.state == .needsAction } }
   var summary: String {
-    if !attention.isEmpty { return "需要处理 \(attention.count) 项" }
+    let required = attention
+    if required.count == 1, let row = required.first { return row.title }
+    if !required.isEmpty { return "需要处理 \(required.count) 项" }
     if let work = activities.first(where: \.isWorking) { return work.title }
     if let waiting = activities.first(where: { $0.state == .waiting && $0.id != "caption" }) {
       return waiting.title
@@ -83,15 +88,19 @@ struct StatusPresentation {
 }
 
 extension AppModel {
+  func hardwareAction(for hardware: DesktopStatus) -> StatusAction? {
+    if hardware.bluetoothBlock?.usesSettings == true { return .bluetoothSettings }
+    if hardware.canConnect, preferences.selectedRecorderID != nil { return .reconnect }
+    if hardware.canConnect, recorderName == nil { return .bind }
+    if hardware.kind == .unknown { return .refreshCard }
+    if hardware.kind == .recording { return .live }
+    return nil
+  }
+
   func statusPresentation(at now: Date) -> StatusPresentation {
     let hardware = deviceStatus(at: now)
     let caption = captionStatus(at: now, hardware: hardware)
-    let hardwareAction: StatusAction?
-    if hardware.bluetoothBlock?.usesSettings == true { hardwareAction = .bluetoothSettings }
-    else if hardware.canConnect { hardwareAction = preferences.selectedRecorderID == nil ? .bind : .reconnect }
-    else if hardware.kind == .unknown { hardwareAction = .refreshCard }
-    else if hardware.kind == .recording { hardwareAction = .live }
-    else { hardwareAction = nil }
+    let hardwareAction = hardwareAction(for: hardware)
 
     var activities: [StatusActivity] = []
     if usesWiFiCard, wifiSync.busy || !wifiSync.result.isEmpty {
@@ -126,59 +135,11 @@ extension AppModel {
                               state: .needsAction, action: .retryImport, error: error))
     }
 
-    let failed = recordings.filter {
-      documents[$0.id]?.error != nil && $0.id != processingID && !queuedRecordingRetries.contains($0.id)
-    }
-    let pending = recordings.filter { documents[$0.id]?.phase != "complete" }
-    let pendingSummaries = days.filter { day in
-      !summaryIsCurrent(day) && recordings.contains { WorkdayTimeline.days($0).contains(day) && documents[$0.id]?.phase == "complete" }
-    }
-    if processingPaused && processingIsRunning {
-      activities.append(.init(id: "processing", title: "正在暂停后台处理…", detail: "当前任务停止后可手动继续。", state: .working))
-    } else if processingPaused && (!pending.isEmpty || !pendingSummaries.isEmpty) {
-      activities.append(.init(id: "processing", title: "录音处理已暂停，需要手动继续", detail: "原件与已完成的文字已保留。",
-                              state: .needsAction, action: .processing, actionLabel: "继续处理"))
-    } else if let id = processingID {
-      let record = recordings.first { $0.id == id }
-      let detail = processingSummaryDay.map { "正在生成 \(WorkspaceDate.title($0))的概述，无需重复启动。" }
-        ?? "\(record?.originalName ?? "已保存的录音") · 无需重复启动。"
-      let title: String
-      if processingSummaryDay != nil { title = "正在生成当天概述" }
-      else if let record, case .working(let stage) = recordingProcessingState(record) { title = stage }
-      else { title = "正在准备转写录音" }
-      activities.append(.init(id: "processing", title: title, detail: detail,
-                              state: .working, action: .pauseProcessing))
-    } else if processingIsRunning {
-      activities.append(.init(id: "processing", title: "后台任务已排队，将自动开始", detail: "无需重复启动。", state: .waiting))
-    } else if !failed.isEmpty {
-      activities.append(.init(id: "processing", title: "\(failed.count) 段录音处理失败，需要重试",
-                              detail: "录音文件已保存，可继续回听。点击重试，从已完成的进度继续。",
-                              state: .needsAction, action: processingIsAvailable ? .processing : .recognitionSettings,
-                              error: failed.first.flatMap { documents[$0.id]?.error },
-                              actionLabel: processingIsAvailable ? "重试处理" : nil))
-    } else if !pending.isEmpty || !pendingSummaries.isEmpty {
-      let title = !pending.isEmpty ? "\(pending.count) 段录音需要手动处理" : "概述尚未生成或更新，需要手动启动"
-      let detail = processingIsAvailable
-        ? "录音文件已保存。点击「开始处理」生成文字、事项与概述。"
-        : "录音文件已保存。请先完成语音识别设置，再开始处理。"
-      activities.append(.init(id: "processing", title: title, detail: detail,
-                              state: .needsAction, action: processingIsAvailable ? .processing : .recognitionSettings))
-    }
-    if !failed.isEmpty && (processingID != nil || processingPaused) {
-      activities.append(.init(id: "processing-failures", title: "\(failed.count) 段录音处理失败",
-                              detail: "当前任务不受影响；可在原始录音中单独重试失败项。",
-                              state: .needsAction, action: .originals,
-                              error: failed.first.flatMap { documents[$0.id]?.error }))
-    }
-    for day in summaryErrors.keys.sorted(by: >) where processingSummaryDay != day {
-      let queued = queuedSummaryRetries.contains(day)
-      activities.append(.init(id: "summary:" + day,
-                              title: "\(WorkspaceDate.title(day)) 概述" + (queued ? "已排队" : "待重试"),
-                              detail: queued ? "当前任务结束后继续；原件与已完成的文字已保留。" : "原件与已完成的文字已保留。",
-                              state: queued ? .waiting : .needsAction,
-                              action: queued ? nil : .summary(day), error: queued ? nil : summaryErrors[day]))
-    }
-    if let error, !failed.contains(where: { record in documents[record.id]?.error.map { error.contains($0) } == true }) {
+    activities += dayProcessingActivities(at: now)
+    if let error, !recordings.contains(where: { recording in
+      guard let cause = documents[recording.id]?.error else { return false }
+      return error == cause || error == cause + "\n录音：" + recording.originalName
+    }) {
       activities.append(.init(id: "app-error", title: "一项操作遇到问题", detail: "查看详情了解影响与原因。",
                               state: .needsAction, error: error))
     }
@@ -186,7 +147,7 @@ extension AppModel {
       activities.append(.init(id: "playback", title: "回听遇到问题", detail: "请检查对应原件后重新播放。",
                               state: .needsAction, action: .originals, error: error))
     }
-    if hardware.kind == .recording || caption.state == .needsAction { activities.append(caption) }
+    if caption.state == .needsAction { activities.append(caption) }
     var notices: [StatusNotice] = []
     if let error { notices.append(.init(source: "app", message: error)) }
     if let error = sync.error { notices.append(.init(source: "sync", message: error)) }
@@ -234,15 +195,18 @@ extension AppModel {
   func performStatusAction(_ action: StatusAction) {
     switch action {
     case .sync(let action): performCardSync(action)
-    case .bind: requestSettings(.device)
+    case .bind: showRecorderPicker()
     case .reconnect: if !isolated { card.activate(.reconnectBound) }
     case .refreshCard: if !isolated { card.activate() }
     case .bluetoothSettings:
       if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.systempreferences") { NSWorkspace.shared.open(url) }
     case .originals: showOriginals()
     case .live: showLiveCaptions()
-    case .processing: retryProcessing()
-    case .pauseProcessing: pauseProcessing()
+    case .processDay(let day): requestDayProcessing(day)
+    case .retryRecordings(let day):
+      for recording in recordingsByDay[day] ?? [] where documents[recording.id]?.error != nil {
+        retryProcessing(scope: .recording(recording.id))
+      }
     case .recognitionSettings: requestSettings(.recognition)
     case .captionSettings: requestSettings(.captions)
     case .retryCaptions: localCaptions.retry()

@@ -4,7 +4,6 @@ import WorkdayCore
 struct SettingsView: View {
   @ObservedObject var model: AppModel
   @State private var apiKey = ""
-  @State private var cloudDetails = false
   @State private var showingClearSamples = false
   var body: some View {
     VStack(spacing: 0) {
@@ -42,10 +41,11 @@ struct SettingsView: View {
   }
   private var device: some View {
     let status = model.deviceStatus(at: Date())
+    let name = model.card.state.connected ? model.card.name : (status.isUSB ? model.usb.volumes.first?.name : nil)
     return group("录音卡") {
       row {
         VStack(alignment: .leading, spacing: 5) {
-          Text(model.preferences.selectedRecorderName).font(.system(size: 13, weight: .medium))
+          Text(name ?? "录音卡未连接").font(.system(size: 13, weight: .medium))
           Text(model.usesWiFiCard && model.wifiSync.usingNetwork ? model.wifiSync.message : status.isUSB ? status.title : status.bluetoothBlock?.instruction ?? model.card.status)
             .font(.system(size: 11)).foregroundStyle(Palette.muted)
         }
@@ -56,18 +56,18 @@ struct SettingsView: View {
         }
         if status.bluetoothBlock?.usesSettings == true {
           BluetoothSettingsButton()
-        } else if status.bluetoothBlock == nil, !status.isUSB {
-          Button(model.card.state.connected ? "刷新状态" : (model.card.scanning ? "寻找中…" : "寻找设备")) { model.card.activate() }
-            .disabled(model.wifiSync.busy || status.kind == .connecting || model.isolated)
+        } else if model.card.state.connected {
+          Button("刷新状态") { model.card.activate() }
+            .disabled(model.wifiSync.busy || model.isolated)
+          Button("断开连接") { model.card.disconnect() }
+            .disabled(!model.canChangeCard || model.isolated)
+        } else if status.bluetoothBlock == nil {
+          Button(model.card.scanning ? "寻找中…" : "寻找设备") { model.card.activate(.all) }
+            .disabled(model.card.scanning || status.kind == .connecting || !model.canChangeCard || model.isolated)
         }
       }
-      if status.canConnect || model.card.state.connected || status.isUSB {
-        row {
-          Button(model.card.state.connected || status.isUSB ? "选择其他录音卡…" : "扫描全部设备") { model.card.findAnother() }
-            .disabled(model.isolated || !model.canChangeCard)
-        }
-      }
-      if !model.card.choices.isEmpty, status.canConnect || model.card.scanning || status.isUSB && !model.card.state.connected {
+      if !model.card.state.connected, !model.card.choices.isEmpty,
+        status.canConnect || model.card.scanning || status.isUSB {
         ForEach(model.card.choices) { choice in
           Divider()
           row {
@@ -75,15 +75,31 @@ struct SettingsView: View {
             if let kind = choice.kind { Text(kind.label).font(.caption).foregroundStyle(Palette.muted) }
             Spacer()
             Text("\(choice.rssi) dBm").font(.caption).foregroundStyle(Palette.muted)
-            Button("连接") { model.card.connect(choice.id) }.disabled(model.isolated || !model.canChangeCard)
+            Button("连接") { model.chooseRecorder(choice) }.disabled(model.isolated || !model.canChangeCard)
           }
         }
       }
-      if let other = model.usesWiFiCard ? model.preferences.boundID : model.preferences.wifiBoundID {
-        let name = model.usesWiFiCard ? model.preferences.boundName : model.preferences.wifiBoundName ?? "Wi-Fi 录音卡"
-        Button("连接已记住的「\(name)」") { model.card.findAnother(id: other) }
-          .disabled(model.isolated || !model.canChangeCard)
+      ForEach(model.usb.detectedVolumes, id: \.url) { volume in
+        if !model.usb.volumes.contains(volume), model.canAssociateUSB(volume) || !model.card.state.connected {
+          Divider()
+          row {
+            VStack(alignment: .leading) {
+              Text(volume.name)
+              Text("USB · \(volume.url.path)").font(.caption).foregroundStyle(Palette.muted)
+            }
+            Spacer()
+            if model.canAssociateUSB(volume) {
+              Button("关联到「\(model.preferences.boundName)」") {
+                model.selectUSB(volume, associateWithBoundCard: true)
+              }
+            }
+            if !model.card.state.connected {
+              Button("使用此 USB 设备") { model.selectUSB(volume, associateWithBoundCard: false) }
+            }
+          }.disabled(!model.canChangeCard || model.usb.detectedVolumes.filter { $0.id == volume.id }.count != 1)
+        }
       }
+      if let error = model.card.selectionError { Text(error).font(.callout).foregroundStyle(Palette.amber) }
       if model.usesWiFiCard { WiFiSyncControls(model: model) }
       Divider()
       row {
@@ -156,13 +172,13 @@ struct SettingsView: View {
       Divider()
       row {
         VStack(alignment: .leading, spacing: 5) {
-          Text("使用阿里云百炼处理")
-          Text("开启后，音频与文字会发送到北京地域的百炼服务，按服务用量计费。结果保存到此 Mac。 ").font(.system(size: 11))
+          Text("使用 ESP 处理")
+          Text("开启后，音频与文字会发送到 ESP 服务，按服务用量计费。结果保存到此 Mac。").font(.system(size: 11))
             .foregroundStyle(Palette.muted).lineSpacing(4).fixedSize(
               horizontal: false, vertical: true)
         }
         Spacer(minLength: 22)
-        Toggle("使用阿里云百炼处理", isOn: $model.preferences.cloudEnabled).labelsHidden().disabled(
+        Toggle("使用 ESP 处理", isOn: $model.preferences.cloudEnabled).labelsHidden().disabled(
           model.demo
         ).onChange(of: model.preferences.cloudEnabled) { _, _ in model.configureChanged() }
       }
@@ -170,7 +186,7 @@ struct SettingsView: View {
       row {
         VStack(alignment: .leading, spacing: 5) {
           Text("云端实时识别")
-          Text(model.preferences.liveModel == .fileTrans
+          Text(model.preferences.liveModel == .segment
                ? "先显示本机初稿。云端转写完成后，同一行字幕和仍在显示的气泡会更新为云端文字。"
                : "与本机同时识别。字幕就绪后最多等云端 150 毫秒，已显示的气泡文字只追加。")
             .font(.system(size: 11)).foregroundStyle(Palette.muted)
@@ -182,14 +198,14 @@ struct SettingsView: View {
       row {
         VStack(alignment: .leading, spacing: 5) {
           Text("实时字幕模型")
-          Text(model.preferences.liveModel == .fileTrans
-               ? "新语音段使用百炼临时文件转写，上传的音频保留 48 小时。"
+          Text(model.preferences.liveModel == .segment
+               ? "每句定稿后，将对应的音频片段发送到 ESP 复核。"
                : "下次连接云端字幕时生效。")
             .font(.system(size: 11)).foregroundStyle(Palette.muted)
         }
         Spacer()
         Picker("实时字幕模型", selection: $model.preferences.liveModel) {
-          ForEach(LiveASRModel.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+          ForEach(LiveASRModel.allCases, id: \.self) { Text($0 == .segment ? "3.1 Flash（逐句复核）" : $0.rawValue).tag($0) }
         }.labelsHidden().pickerStyle(.menu).frame(width: 245)
           .accessibilityIdentifier("live-asr-model")
       }
@@ -197,15 +213,11 @@ struct SettingsView: View {
       row {
         VStack(alignment: .leading, spacing: 5) {
           Text("完整录音转写模型")
-          Text(model.preferences.recordingModel == .flash31
-               ? "新录音转写时按发言人分段。" : "新录音转写为文字和时间戳。")
+          Text("新录音转写时按发言人分段。")
             .font(.system(size: 11)).foregroundStyle(Palette.muted)
         }
         Spacer()
-        Picker("完整录音转写模型", selection: $model.preferences.recordingModel) {
-          ForEach(RecordingASRModel.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-        }.labelsHidden().pickerStyle(.menu).frame(width: 245)
-          .accessibilityIdentifier("recording-asr-model")
+        Text(AIService.recordingModel).font(.caption)
       }
       Divider()
       VStack(alignment: .leading, spacing: 14) {
@@ -215,18 +227,14 @@ struct SettingsView: View {
           Spacer()
         }
         HStack {
-          SecureField("输入百炼 API Key", text: $apiKey).textFieldStyle(.roundedBorder)
+          SecureField("输入 ESP API Key", text: $apiKey).textFieldStyle(.roundedBorder)
           Button("保存密钥") {
             model.saveKey(apiKey)
             if model.hasKey { apiKey = "" }
           }.disabled(
             apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isolated)
         }
-        DisclosureGroup("业务空间（可选）", isExpanded: $cloudDetails) {
-          TextField("Workspace ID，留空使用默认北京地址", text: $model.preferences.workspaceID)
-            .textFieldStyle(.roundedBorder).padding(.top, 8)
-        }.font(.system(size: 11)).foregroundStyle(Palette.muted)
-        Text("录音整理使用 Qwen Plus").font(.system(size: 11)).foregroundStyle(Palette.muted)
+        Text("录音整理使用 \(AIService.organizationModel)").font(.system(size: 11)).foregroundStyle(Palette.muted)
       }.padding(16)
       if model.live.canRetry {
         Divider()
@@ -240,20 +248,6 @@ struct SettingsView: View {
   }
   private var archive: some View {
     group("本地归档") {
-      if let boundSource = model.boundSource, model.usb.volumes.count == 1,
-        model.catalog.bindings[boundSource] != model.usb.volumes.first?.id
-      {
-        row {
-          VStack(alignment: .leading, spacing: 5) {
-            Text("确认录音卡来源")
-            Text("若此 USB 录音卡就是已绑定设备，关联后可核对蓝牙下的待同步数量。")
-              .font(.system(size: 11)).foregroundStyle(Palette.muted)
-          }
-          Spacer()
-          Button("这是已绑定的录音卡") { model.bindCurrentUSB() }
-        }
-        Divider()
-      }
       row {
         VStack(alignment: .leading, spacing: 5) {
           Text("保存位置")

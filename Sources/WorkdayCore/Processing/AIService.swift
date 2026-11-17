@@ -1,30 +1,37 @@
 import CoreFoundation
 import Foundation
 
-public enum RecordingASRModel: String, CaseIterable, Codable, Sendable {
-  case flash31 = "qwen-audio-3.1-asr-flash"
-  case flash30 = "qwen-audio-3.0-asr-flash"
-}
-
 public struct AIService: InferenceServing {
+  public static let recordingModel = "qwen-audio-3.1-asr-flash"
+  public static let organizationModel = "gpt-6.1-sol"
   public let key: String
-  public let host: String
-  public internal(set) var recordingModel: RecordingASRModel
-  public var transcriptionModel: String { recordingModel.rawValue }
+  public var transcriptionModel: String { Self.recordingModel }
   let sessionConfiguration: URLSessionConfiguration = .ephemeral
-  public init(key: String, host: String = "dashscope.aliyuncs.com", recordingModel: RecordingASRModel = .flash31) {
-    self.key = key
-    self.host = host
-    self.recordingModel = recordingModel
-  }
+
+  public init(key: String) { self.key = key }
   public func transcribe(audio: Data, format: String, chunk: Int, offset: Double, duration: Double)
     async throws -> [TranscriptLine]
   {
+    guard let data = try await recognize(audio: audio, format: format, identifySpeakers: true,
+                                         operation: "转写第 \(chunk + 1) 段音频") else { return [] }
+    return try Self.parseTranscript(data, chunk: chunk, offset: offset, duration: duration)
+  }
+
+  public func transcribeCaption(wav: Data) async throws -> String {
+    guard let data = try await recognize(audio: wav, format: "wav", identifySpeakers: false,
+                                         operation: "复核字幕") else { return "" }
+    guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let output = root["output"] as? [String: Any], let text = output["text"] as? String
+    else { throw WorkdayError.invalid("ESP 未返回字幕文字") }
+    return text.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private func recognize(audio: Data, format: String, identifySpeakers: Bool, operation: String) async throws -> Data? {
     guard audio.count < 8_000_000, !audio.isEmpty, ["wav", "opus"].contains(format) else {
       throw WorkdayError.invalid("转写音频分段无效")
     }
-    var parameters: [String: Any] = ["format": format, "sample_rate": "16000"]
-    if recordingModel == .flash31 { parameters["speaker_diarization_enabled"] = true }
+    var parameters: [String: Any] = ["format": format, "sample_rate": 16000]
+    if identifySpeakers { parameters["speaker_diarization_enabled"] = true }
     let body: [String: Any] = [
       "model": transcriptionModel,
       "input": [
@@ -44,15 +51,11 @@ public struct AIService: InferenceServing {
       ],
       "parameters": parameters,
     ]
-    let data: Data
     do {
-      data = try await request(
-        path: "/api/v1/services/aigc/multimodal-generation/generation", body: body,
-        operation: "转写第 \(chunk + 1) 段音频")
+      return try await request(path: "services/aigc/multimodal-generation/generation", body: body, operation: operation)
     } catch let failure as HTTPFailure where failure.isEmptyTranscript {
-      return []
+      return nil
     }
-    return try Self.parseTranscript(data, chunk: chunk, offset: offset, duration: duration)
   }
   public func organize(lines: [TranscriptLine]) async throws -> [ConversationProposal] {
     try await organize(lines: lines) { _, error in throw error }
@@ -283,14 +286,13 @@ public struct AIService: InferenceServing {
   }
   private func chat(system: String, input: String, operation: String) async throws -> Data {
     let body: [String: Any] = [
-      "model": "qwen-plus",
+      "model": Self.organizationModel,
       "messages": [["role": "system", "content": system + "\n只输出一个符合上述格式的 JSON 对象。"],
                    ["role": "user", "content": input]],
-      "temperature": 0.1, "response_format": ["type": "json_object"], "stream": false,
-      "enable_thinking": false,
+      "response_format": ["type": "json_object"], "stream": false,
     ]
     let data = try await request(
-      path: "/compatible-mode/v1/chat/completions", body: body, operation: operation)
+      path: "chat/completions", body: body, operation: operation)
     guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
       let choices = object["choices"] as? [[String: Any]], let choice = choices.first,
       choice["finish_reason"] as? String == "stop",
@@ -300,20 +302,13 @@ public struct AIService: InferenceServing {
     return Data(content.utf8)
   }
   private func request(path: String, body: [String: Any], operation: String) async throws -> Data {
-    guard !key.isEmpty else { throw WorkdayError.invalid("请先在设置中保存百炼 API Key") }
-    guard
-      host == "dashscope.aliyuncs.com"
-        || host.range(
-          of: #"^[a-zA-Z0-9-]+\.cn-beijing\.maas\.aliyuncs\.com$"#, options: .regularExpression)
-          != nil,
-      let url = URL(string: "https://\(host)\(path)")
-    else { throw WorkdayError.invalid("百炼服务地址无效") }
+    guard !key.isEmpty else { throw WorkdayError.invalid("请先在设置中保存 ESP API Key") }
+    let url = URL(string: "https://esp.xkw.cn/ai/v1/")!.appendingPathComponent(path)
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
     request.timeoutInterval = 180
     request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue("disable", forHTTPHeaderField: "X-DashScope-SSE")
     request.httpBody = try JSONSerialization.data(withJSONObject: body)
     let session = URLSession(configuration: sessionConfiguration)
     defer { session.invalidateAndCancel() }

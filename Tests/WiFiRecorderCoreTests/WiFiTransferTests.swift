@@ -83,6 +83,7 @@ private final class TestBluetooth: WiFiSyncBluetooth {
   var onWiFiLost: (() -> Void)?
   var raw: UInt8 = 0
   var releases = 0
+  var onRelease: () -> Void = {}
   func queryWiFiState() { onWiFiState?(raw) }
   func openWiFiHotspot(for id: String) {
     XCTAssertEqual(boundID, id)
@@ -91,6 +92,7 @@ private final class TestBluetooth: WiFiSyncBluetooth {
   }
   func releaseForWiFi() {
     releases += 1
+    onRelease()
     onWiFiLost?()
   }
 }
@@ -120,14 +122,25 @@ extension WiFiTransferTests {
     let card = TestBluetooth()
     let wifi = TestNetwork()
     var port: UInt16 = 0
-    let sync = WiFiRecordingSync(store: store, card: card, wifi: wifi) { client, id, _ in
-      client.connect(deviceID: id, host: "127.0.0.1", port: port, wifiOnly: false)
+    let model = AppModel(libraryURL: root, makeWiFiSync: { archive in
+      WiFiRecordingSync(store: archive, card: card, wifi: wifi) { client, id, _ in
+        client.connect(deviceID: id, host: "127.0.0.1", port: port, wifiOnly: false)
+      }
+    })
+    let sync = model.wifiSync
+    model.card.onWiFiBound?("fixture-card", "FW925")
+    let selected = try XCTUnwrap(model.recorderSyncTarget)
+    XCTAssertEqual(model.recorderSidebarTitle, "录音卡")
+    card.onRelease = { [unowned model] in
+      XCTAssertEqual(model.recorderSidebarTitle, "FW925")
     }
-    sync.attach()
+    XCTAssertEqual(selected, .wifi("fixture-card"))
+    model.syncRecorder(.wifi("other-card"))
+    XCTAssertFalse(sync.busy)
     card.raw = 7
     let blocked = expectation(description: "require fresh idle state")
     sync.onArchiveChange = { blocked.fulfill() }
-    sync.start(id: "fixture-card")
+    model.syncRecorder(selected)
     await fulfillment(of: [blocked], timeout: 4)
     XCTAssertEqual(wifi.joins, 0)
     XCTAssertFalse(card.wifiBusy)
@@ -146,7 +159,7 @@ extension WiFiTransferTests {
             .trimmingCharacters(in: .whitespacesAndNewlines)))
       let complete = expectation(description: scenario)
       sync.onArchiveChange = { complete.fulfill() }
-      sync.start(id: "fixture-card")
+      model.syncRecorder(selected)
       await fulfillment(of: [complete], timeout: 8)
       peer.waitUntilExit()
       XCTAssertEqual(peer.terminationStatus, 0)
@@ -156,6 +169,7 @@ extension WiFiTransferTests {
       XCTAssertEqual(records.count, 1)
       XCTAssertEqual(records.first?.duration, 0.32)
       XCTAssertEqual(sync.pending, 0)
+      XCTAssertEqual(model.recorderSidebarTitle, "录音卡")
       await sync.shutdown()
     }
     XCTAssertEqual(card.releases, 2)

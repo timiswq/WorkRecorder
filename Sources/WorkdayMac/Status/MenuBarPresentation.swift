@@ -9,6 +9,7 @@ struct MenuBarTaskSummary {
   let headline: String
   let detail: String
   let fullDetail: String
+  let hasWarning: Bool
   let attentionCount: Int
   let destination: MenuBarDestination?
 
@@ -16,22 +17,21 @@ struct MenuBarTaskSummary {
     let tasks = presentation.activities.filter { $0.id != "caption" }
     let liveFailure = presentation.hardware.kind == .recording
       && presentation.caption.state == .needsAction ? presentation.caption : nil
-    let attention = tasks.filter { $0.state == .needsAction }
+    let attention = tasks.filter(\.requiresAction)
     attentionCount = attention.count + (liveFailure == nil ? 0 : 1)
-    let first = liveFailure ?? attention.first ?? tasks.first(where: \.isWorking)
+    let first = liveFailure ?? attention.first(where: { $0.state == .needsAction }) ?? attention.first ?? tasks.first(where: \.isWorking)
       ?? tasks.first(where: { $0.state == .waiting }) ?? tasks.first
+    hasWarning = first?.state == .needsAction
     headline = attentionCount > 0 ? "\(attentionCount) 项待处理" : "后台任务"
     fullDetail = first?.title ?? "暂无进行中的任务"
     detail = Self.short(fullDetail)
     destination = first.map { activity in
       if activity.id == "caption" { return .live }
-      if activity.id.hasPrefix("summary:") {
-        return .day(String(activity.id.dropFirst("summary:".count)))
-      }
+      if let day = activity.day { return .day(day) }
       if activity.id == "sync" || activity.id == "sync-failure" || activity.id == "previous-sync" {
         return .device
       }
-      if activity.id == "import" || activity.id.hasPrefix("processing") { return .originals }
+      if activity.id == "import" { return .originals }
       return .main
     }
   }
