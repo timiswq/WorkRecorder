@@ -6,9 +6,13 @@ public struct AppleBubblePhrase: Equatable {
   public let text: String
   public let continuesPrevious: Bool
 
-  public init(text: String, continuesPrevious: Bool) {
+  /// Words assigned to this transcript row after the preceding bubble draft had already released them.
+  public let carriedText: String
+
+  public init(text: String, continuesPrevious: Bool, carriedText: String = "") {
     self.text = text
     self.continuesPrevious = continuesPrevious
+    self.carriedText = carriedText
   }
 }
 
@@ -351,7 +355,8 @@ public struct AppleCaptionPhrases {
       var draft = drafts[id] ?? BubbleDraft()
       draft.advance(group, confirmed: confirmedThrough, final: finishing || offset < completed)
       drafts[id] = draft
-      let bubble = AppleBubblePhrase(text: draft.text, continuesPrevious: continuations.contains(id))
+      let bubble = AppleBubblePhrase(text: draft.text, continuesPrevious: continuations.contains(id),
+                                    carriedText: draft.carried)
       bubblePhrases[id] = bubble
       if published[id] != event || previousBubbles[id] != bubble {
         events.append(event)

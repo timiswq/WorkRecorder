@@ -19,10 +19,12 @@ public actor SpeakerEncoder {
     return try embedding(samples)
   }
 
+  public static func acceptsLivePacketCount(_ count: Int) -> Bool {
+    (4_000...240_000).contains(count) && count.isMultiple(of: 40)
+  }
+
   public func live(packets: Data) throws -> [Float]? {
-    guard (4000...240000).contains(packets.count), packets.count.isMultiple(of: 40) else {
-      return nil
-    }
+    guard Self.acceptsLivePacketCount(packets.count) else { return nil }
     let valid = packets.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
       stride(from: 0, to: raw.count, by: 40).allSatisfy { i in
         let toc = raw[i]

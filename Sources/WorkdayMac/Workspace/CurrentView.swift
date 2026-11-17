@@ -173,12 +173,12 @@ struct CurrentView: View {
         Menu {
           speakerAction(speaker, record: record)
         } label: {
-          Text(speaker.label.captionTitle(using: model.preferences.captions)).lineLimit(1)
+          Text(speaker.title(using: model.preferences.captions)).lineLimit(1)
         }.menuStyle(.borderlessButton).controlSize(.small)
           .tint(speakerColor).fixedSize(horizontal: false, vertical: true)
           .contextMenu { speakerAction(speaker, record: record) }
           .accessibilityLabel(
-            "发言人：" + speaker.label.captionTitle(using: model.preferences.captions))
+            "发言人：" + speaker.title(using: model.preferences.captions))
         if !record.isFinal {
           Text(
             model.localCaptions.isWorking && model.localCaptions.lines.last?.id == record.id
@@ -219,13 +219,13 @@ struct CurrentView: View {
     .accessibilityAction(named: Text("选中这句字幕")) { model.selectCaption(record) }
   }
 
-  private func speakerAction(_ speaker: CaptionSpeaker, record: CaptionRecord) -> some View {
-    Button(speaker.controls.rawValue) {
-      if speaker.controls == .confirm {
-        model.confirmCaption(record.id)
-      } else {
-        model.correctCaption(record.id, expectedTurn: speaker.id)
-      }
+  @ViewBuilder private func speakerAction(_ speaker: CaptionSpeaker, record: CaptionRecord) -> some View {
+    if speaker.markedHere && !speaker.hasSavedSample { Text("仅标注本句") }
+    if !speaker.label.isMine {
+      Button("是我") { model.confirmCaption(record.id) }
+    }
+    if !speaker.label.excluded {
+      Button("不是我") { model.correctCaption(record.id, expectedTurn: speaker.id) }
     }
   }
 

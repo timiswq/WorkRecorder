@@ -170,14 +170,6 @@ extension RandomAccessCollection where Element == CaptionRecord, Index == Int {
     catch { issue = error.localizedDescription }
   }
 
-  func reviewedText(for line: LiveLine) -> String? {
-    guard line.isFinal, let time = line.receivedAt, let frames = line.replay?.frames else { return nil }
-    let range = records.firstIndex(atOrAfter: time)..<records.firstIndex(after: time)
-    guard let record = records[range].first(where: { $0.id == line.id && $0.replay == frames }),
-          case .complete(let text) = record.fileReview else { return nil }
-    return text
-  }
-
   func accept(_ line: LiveLine, evidenceID: String?) {
     guard let time = line.receivedAt else { return }
     let start = CaptionWindow(now: clock()).start

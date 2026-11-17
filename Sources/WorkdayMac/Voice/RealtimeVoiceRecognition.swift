@@ -164,7 +164,8 @@ import WorkdayCore
       // pending; a pending rolling estimate must not erase an existing match.
       if entry.decision.status == .pending { continue }
       let evidence = entry.evidence
-      let canEnroll = evidence.range.lowerBound >= range.lowerBound && evidence.range.upperBound <= range.upperBound + 320
+      let canEnroll = tracks.count <= 1 && !late && evidence.range.lowerBound >= range.lowerBound
+        && evidence.range.upperBound <= range.upperBound + 320
       let id = "realtime:\(evidence.generation.uuidString):\(line.id):\(evidence.range.lowerBound)-\(evidence.range.upperBound)"
       var shown = line
       if line.isFinal {
@@ -177,7 +178,7 @@ import WorkdayCore
       }
       next[line.id] = .init(line: shown, entry: entry, canEnroll: canEnroll)
       if line.isFinal, mode == .active {
-        do { try database().persistRealtimeEvidence(id: id, source: source, evidence: evidence, decision: entry.decision) }
+        do { try database().persistRealtimeEvidence(id: id, source: source, evidence: evidence, decision: entry.decision, canEnroll: canEnroll) }
         catch { failure(error) }
       }
     }
@@ -214,7 +215,7 @@ import WorkdayCore
     guard presentation.canEnroll else { return false }
     let entry = presentation.entry
     try database.persistRealtimeEvidence(id: id, source: source, evidence: entry.evidence,
-                                         decision: entry.decision, savePCM: true)
+                                         decision: entry.decision, canEnroll: true, savePCM: true)
     return true
   }
 

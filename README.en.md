@@ -11,7 +11,7 @@ Select the B3085 in device settings. After recording, choose **Sync recordings**
 ## Features
 
 - USB archival with file-size and SHA-256 verification before configured cleanup of card copies.
-- Apple on-device captions, optional ESP transcription, 24-hour caption history, and sentence replay.
+- Apple on-device captions append stable phrases as you speak, including speech from unidentified speakers. ESP can supply live transcription or review each final sentence. Caption history keeps the latest text and sentence replay for 24 hours.
 - Dismissible desktop captions, a menu bar status panel, and a Dock icon that changes with recorder state and shows the pending-sync count.
 - Live speaker matching with local CAM++ and Silero models. Confirm or correct a speaker, review samples, or reset the sample library in Settings.
 - Daily overviews and transcripts grouped by morning, afternoon, and evening. Follow processing progress or replay recordings from the time-of-day scrubber.

@@ -171,13 +171,24 @@ final class LiveIdentityIntegrationTests: XCTestCase {
     let shown = voices.presentationLine(line)
     let id = try XCTUnwrap(shown.bubbleVoiceID)
     XCTAssertTrue(voices.label(id)?.isMine == true)
-    voices.markBubble(lineID: line.id, evidence: id, packets: try XCTUnwrap(shown.bubblePackets), mine: true)
+    voices.setCaptionMark(lineID: line.id, mine: true, evidence: id, packets: try XCTUnwrap(shown.bubblePackets))
     XCTAssertEqual(voices.sampleCount, 1, "A neighbouring window may identify continuity but must not enroll on this short sentence's feedback")
     XCTAssertTrue(voices.captionSpeaker(lineID: line.id, evidenceID: id).markedHere)
+    var final = line
+    final.isFinal = true
+    voices.observeLiveLines([final])
+    XCTAssertTrue(try db.hasLiveVoice(id))
+    let reopened = VoiceRecognition(root: root)
+    reopened.setCaptionMark(lineID: line.id, mine: false, evidence: id)
+    XCTAssertTrue(reopened.captionSpeaker(lineID: line.id, evidenceID: id).label.excluded)
+    XCTAssertEqual(reopened.negativeSampleCount, 0)
+    reopened.setCaptionMark(lineID: line.id, mine: true, evidence: id)
+    XCTAssertEqual(reopened.sampleCount, 1)
+    reopened.stop()
     voices.stop()
   }
 
-  @MainActor func testFinalCaptionFeedbackKeepsPacketEvidenceAfterMemoryEviction() throws {
+  @MainActor func testFinalCaptionFeedbackKeepsPacketEvidenceAfterMemoryEviction() async throws {
     let root = root()
     defer { try? FileManager.default.removeItem(at: root) }
     let db = try VoiceLibrary(root: root)
@@ -192,9 +203,18 @@ final class LiveIdentityIntegrationTests: XCTestCase {
       packets: packets, packetStartFrame: 0, inferenceMilliseconds: 1))
     let id = try XCTUnwrap(voices.presentationLine(line).bubbleVoiceID)
     voices.observeLiveLines([])
-    voices.setCaptionMark(lineID: line.id, mine: true, evidence: id)
-    XCTAssertEqual(try db.sampleAudio(id), packets)
-    XCTAssertEqual(voices.sampleCount, 1)
     voices.stop()
+    let app = AppModel(libraryURL: root)
+    var historyLine = line
+    historyLine.receivedAt = Date()
+    app.captionHistory.accept(historyLine, evidenceID: id)
+    XCTAssertTrue(app.confirmCaption(line.id))
+    XCTAssertEqual(try db.sampleAudio(id), packets)
+    XCTAssertEqual(app.voices.sampleCount, 1)
+    let speaker = app.captionSpeaker(for: try XCTUnwrap(app.captionHistory.records.last))
+    XCTAssertTrue(app.correctCaption(line.id, expectedTurn: speaker.id))
+    XCTAssertEqual(app.voices.sampleCount, 0)
+    XCTAssertEqual(app.voices.negativeSampleCount, 1)
+    await app.shutdown()
   }
 }

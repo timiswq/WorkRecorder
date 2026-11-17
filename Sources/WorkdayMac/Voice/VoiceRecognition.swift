@@ -5,8 +5,14 @@ import WorkdayCore
 struct CaptionSpeaker {
   let id: String
   let label: VoiceLabel
-  var markedHere = false
+  /// Persisted feedback to edit or undo. An inferred speaker has no mark on this caption.
+  let markID: String?
+  var markedHere: Bool { markID != nil }
 
+  var hasSavedSample: Bool { markedHere && (label.sampleID != nil || label.isNegativeSample) }
+  func title(using preferences: CaptionPreferences) -> String {
+    markedHere && label.excluded ? "非本人" : label.captionTitle(using: preferences)
+  }
   var controls: CaptionIdentityControls { label.isMine ? .reject : .confirm }
 }
 
@@ -18,8 +24,6 @@ struct CaptionSpeaker {
   private var scheduled: [String: Int] = [:]
   private var archiveTask: Task<Void, Never>?
   private var liveTasks: [String: Task<Void, Never>] = [:]
-  private enum CaptionMark { case mine, notMine }
-  private var pendingCaptions: [String: CaptionMark] = [:]
   private let usableLiveVoices = NSCache<NSString, NSNumber>()
   private(set) var captionIdentityRevision = 0
   private var stopped = false
@@ -35,7 +39,7 @@ struct CaptionSpeaker {
   var confirmed: Bool { library?.confirmed == true }
   var sampleCount: Int { library?.sampleCount ?? 0 }
   var negativeSampleCount: Int { library?.negativeSampleCount ?? 0 }
-  var canClearSamples: Bool { sampleCount > 0 || negativeSampleCount > 0 || !pendingCaptions.isEmpty }
+  var canClearSamples: Bool { sampleCount > 0 || negativeSampleCount > 0 }
 
   init(root: URL) {
     self.root = root
@@ -69,20 +73,31 @@ struct CaptionSpeaker {
     }
     return id.hasPrefix("caption:") ? .forUtterance() : nil
   }
+  // A label without audio follows the transcript row. A confirmed draft sample follows its exact audio span.
   static func captionMark(_ lineID: String, evidence: String?) -> String {
     if let evidence, evidence.hasPrefix("draft:") { return "caption:" + evidence }
     return "caption:" + lineID
   }
   func captionSpeaker(lineID: String, evidenceID: String?) -> CaptionSpeaker {
+    let row = Self.captionMark(lineID, evidence: nil)
     let utterance = Self.captionMark(lineID, evidence: evidenceID)
+    if row != utterance, let mark = label(row), mark.isMine || mark.excluded {
+      return CaptionSpeaker(id: mark.sampleID ?? row, label: mark, markID: row)
+    }
     let local = label(utterance) ?? .forUtterance()
-    if let sample = local.sampleID { return CaptionSpeaker(id: sample, label: local, markedHere: true) }
-    if !local.isMine, !local.excluded, let evidenceID, var matched = label(evidenceID) {
+    if local.isMine || local.excluded {
+      return CaptionSpeaker(id: local.sampleID ?? utterance, label: local, markID: utterance)
+    }
+    if let evidenceID, var matched = label(evidenceID) {
       // A sample confirmed on a covering cloud turn is an inference for this local bubble.
       if evidenceID.hasPrefix("live:"), evidenceID != "live:" + lineID { matched.sampleID = nil }
-      return CaptionSpeaker(id: evidenceID, label: matched)
+      return CaptionSpeaker(id: evidenceID, label: matched, markID: nil)
     }
-    return CaptionSpeaker(id: utterance, label: local, markedHere: local.isMine || local.excluded)
+    return CaptionSpeaker(id: utterance, label: local, markID: nil)
+  }
+  func usableVoiceID(for line: LiveLine) -> String? {
+    guard let id = line.bubbleVoiceID, hasLiveVoice(id) else { return nil }
+    return id
   }
   func hasLiveVoice(_ id: String?) -> Bool {
     guard let id else { return false }
@@ -93,23 +108,6 @@ struct CaptionSpeaker {
     return usable
   }
 
-  func markBubble(lineID: String, evidence: String, packets: Data, mine: Bool) {
-    change { db in
-      var canEnroll = true
-      if evidence.hasPrefix("realtime:") {
-        canEnroll = try realtime.persistFeedback(id: evidence, packets: packets, database: db)
-      }
-      try db.setCaptionMark(Self.captionMark(lineID, evidence: evidence), mine: mine,
-                            evidence: canEnroll ? evidence : nil, packets: canEnroll ? packets : nil)
-      pendingCaptions[lineID] = nil
-    }
-  }
-
-  private func profileChanged() {
-    realtime.profileChanged()
-    captionIdentityRevision += 1
-    objectWillChange.send()
-  }
   func appendLiveAudio(_ data: Data, offset: Int, source: String) {
     realtime.append(data, offset: offset, source: source)
   }
@@ -123,100 +121,71 @@ struct CaptionSpeaker {
     change { db in
       let utterance = captionLineID.map { "caption:" + $0 }
       try db.confirm(id, utterance: utterance)
-      if let line = captionLineID, id == utterance, try db.label(id) == .forUtterance(mine: true) {
-        pendingCaptions[line] = .mine
-      }
     }
   }
-  func setCaptionMark(lineID: String, mine: Bool, evidence: String?) {
-    change { db in
-      let packets = evidence.flatMap { $0.hasPrefix("realtime:") ? realtime.feedbackPackets($0) : nil }
-      var canEnroll = true
-      if let evidence, let packets {
-        canEnroll = try realtime.persistFeedback(id: evidence, packets: packets, database: db)
+
+  /// Decide sample eligibility at the instant of feedback. A later voice result cannot enroll a label.
+  func setCaptionMark(lineID: String, mine: Bool, evidence: String?, packets: Data? = nil) {
+    updateIdentity { db in
+      var sample = evidence
+      var audio = packets
+      if let evidence, evidence.hasPrefix("realtime:"), let current = realtime.feedbackPackets(evidence) {
+        let selected = packets ?? current
+        audio = selected
+        if try !realtime.persistFeedback(id: evidence, packets: selected, database: db) { sample = nil }
       }
-      let mark = Self.captionMark(lineID, evidence: evidence)
-      try db.setCaptionMark(mark, mine: mine, evidence: canEnroll ? evidence : nil, packets: canEnroll ? packets : nil)
-      let isPending = try db.label(mark) == .forUtterance(mine: mine)
-      pendingCaptions[lineID] = evidence?.hasPrefix("realtime:") != true && isPending ? (mine ? .mine : .notMine) : nil
+      if let id = sample, try !db.canEnrollCaption(id) { sample = nil }
+      if let audio, !SpeakerEncoder.acceptsLivePacketCount(audio.count) { sample = nil }
+      let previous = captionSpeaker(lineID: lineID, evidenceID: evidence)
+      let mark = previous.markID ?? Self.captionMark(lineID, evidence: sample)
+      try db.setCaptionMark(mark, mine: mine, evidence: sample, packets: sample == nil ? nil : audio)
+      return sample != nil || previous.hasSavedSample
     }
-  }
-  /// A tap on a draft can precede both the final timestamps and local inference.
-  func resolvePendingCaptions(in live: LivePreview) {
-    guard !pendingCaptions.isEmpty, let library else { return }
-    do {
-      let retained = Set(live.lines.map(\.id))
-      pendingCaptions = pendingCaptions.filter { retained.contains($0.key) }
-      for line in live.lines {
-        guard let mark = pendingCaptions[line.id], let id = line.voiceID else { continue }
-        guard try library.contains(id) else {
-          if let audio = live.confirmationAudio[line.id] {
-            observeLive(id: id, source: audio.source, packets: audio.packets, seconds: audio.seconds,
-                        countDuration: false)
-          }
-          continue
-        }
-        let utterance = "caption:" + line.id
-        switch mark {
-        case .mine: try library.confirm(id, utterance: utterance, pendingOnly: true)
-        case .notMine: try library.markNotMine(utterance, evidence: id, pendingOnly: true)
-        }
-        pendingCaptions[line.id] = nil
-        profileChanged()
-      }
-    } catch { report(error) }
   }
   func setExcluded(_ excluded: Bool, for id: String) {
-    change { db in
+    updateIdentity { db in
       guard let label = try db.label(id), excluded ? (label.canConfirm || label.canAddSample) : label.excluded
-      else { return }
+      else { return false }
       if let group = label.group, !label.isMine {
         if excluded { try db.reject(group) } else { try db.restore(group) }
       } else if excluded {
         try db.markNotMine(id, evidence: id.hasPrefix("caption:") ? nil : id)
       } else {
         try db.undoNotMine(id)
-        if id.hasPrefix("caption:") { pendingCaptions[String(id.dropFirst("caption:".count))] = nil }
       }
+      return label.group != nil || label.isNegativeSample || !id.hasPrefix("caption:")
     }
   }
   func undoConfirmation(for id: String) {
-    change { db in
-      guard let label = try db.label(id), label.isMine else { return }
+    updateIdentity { db in
+      guard let label = try db.label(id), label.isMine else { return false }
       if let sample = label.sampleID { try db.removeSample(sample) }
       else if label.group == nil {
         try db.markUtterance(id, mine: nil)
-        if id.hasPrefix("caption:") { pendingCaptions[String(id.dropFirst("caption:".count))] = nil }
       }
+      return label.sampleID != nil
     }
   }
   func name(_ group: Int64, _ name: String) { change { try $0.name(group, name) } }
   func nameArchiveSpeaker(_ turn: String, _ name: String) {
     change { try $0.nameArchiveSpeaker(turn: turn, name: name) }
   }
-  func undo() {
-    change {
-      try $0.undoConfirmation()
-      pendingCaptions = pendingCaptions.filter { $0.value != .mine }
-    }
-  }
-  func clearNegativeSamples() {
-    change {
-      try $0.clearNegativeSamples()
-      pendingCaptions = pendingCaptions.filter { $0.value != .notMine }
-    }
-  }
-  func clearSamples() {
-    change {
-      try $0.clearSamples()
-      pendingCaptions.removeAll()
-    }
-  }
+  func undo() { change { try $0.undoConfirmation() } }
+  func clearNegativeSamples() { change { try $0.clearNegativeSamples() } }
+  func clearSamples() { change { try $0.clearSamples() } }
   private func change(_ perform: (VoiceLibrary) throws -> Void) {
+    updateIdentity { db in
+      try perform(db)
+      return true
+    }
+  }
+  /// A label-only correction leaves continuous speaker tracking intact.
+  private func updateIdentity(_ edit: (VoiceLibrary) throws -> Bool) {
     do {
-      try perform(db())
+      if try edit(db()) { realtime.profileChanged() }
       if error != nil { error = nil }
-      profileChanged()
+      captionIdentityRevision += 1
+      objectWillChange.send()
     } catch { report(error) }
   }
   private func report(_ failure: Error) {

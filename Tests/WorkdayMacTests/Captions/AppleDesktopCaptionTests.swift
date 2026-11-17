@@ -42,7 +42,7 @@ final class AppleDesktopCaptionTests: XCTestCase {
     await model.shutdown()
   }
 
-  @MainActor func testSpeechFeedbackAndShortCaptionStayInTranscriptWithoutOpeningBubble() async throws {
+  @MainActor func testSpeechWaveOpensIntoStableWordsWithNoVoice() async throws {
     guard let fixture = ProcessInfo.processInfo.environment["WORKDAY_APPLE_SPEECH_EDGES"],
           let output = ProcessInfo.processInfo.environment["WORKDAY_TEST_ROOT"]
     else { throw XCTSkip("Requires synthetic card audio") }
@@ -67,7 +67,8 @@ final class AppleDesktopCaptionTests: XCTestCase {
     }
     let pending = try XCTUnwrap(live.pendingSpeech)
     XCTAssertLessThanOrEqual(sent / 2, 500, "首句样本已送入半秒音频，字幕页应有收音反馈")
-    XCTAssertNil(model.desktop.panel)
+    model.desktop.refresh()
+    XCTAssertEqual(model.desktop.panel?.feedView.rootView.presentation.content.items.filter(\.isSoundFeedback).first?.id, pending.id)
     XCTAssertTrue(model.captionHistory.records.isEmpty)
     XCTAssertTrue(live.lines.isEmpty)
     // Log the input clock separately from replay wall time (includes window setup and scheduling).
@@ -78,10 +79,24 @@ final class AppleDesktopCaptionTests: XCTestCase {
     XCTAssertTrue(model.captionHistory.records.isEmpty)
     let end = Double(sent) / 2
     stream.sendApple([ASRWord(text: "号", startMs: 0, endMs: end)], final: false, range: 0..<end)
-    XCTAssertNil(model.desktop.panel)
+    XCTAssertTrue(model.desktop.panel?.feedView.rootView.presentation.content.items.allSatisfy(\.isSoundFeedback) == true)
+    for text in ["好吧", "好吧明天见"] {
+      stream.sendApple([ASRWord(text: text, startMs: 0, endMs: end)], final: false, range: 0..<end)
+    }
+    XCTAssertNil(live.pendingSpeech, "识别器已经给出可读短语")
+    model.desktop.refresh()
+    let visible = try XCTUnwrap(model.desktop.panel?.feedView.rootView.presentation.content.items.first)
+    XCTAssertEqual(visible.id, pending.id)
+    XCTAssertFalse(visible.isSoundFeedback)
+    XCTAssertEqual(visible.text, "好吧")
+    XCTAssertNil(visible.voiceID)
+    XCTAssertEqual(visible.identityControls, .confirm)
     stream.sendApple([ASRWord(text: "好", startMs: 0, endMs: end)], final: true, range: 0..<end)
+    stream.finishApple() // The last Apple group commits when the recognizer closes the turn.
+    XCTAssertEqual(live.lines.last?.isFinal, true)
     XCTAssertNil(live.pendingSpeech)
-    XCTAssertNil(model.desktop.panel)
+    model.desktop.refresh()
+    XCTAssertEqual(model.desktop.panel?.feedView.rootView.presentation.content.items.first?.text, visible.text)
     XCTAssertEqual(live.lines.last?.id, pending.id)
     XCTAssertEqual(model.captionHistory.records.map(\.text), ["好"])
     await model.shutdown()
@@ -92,7 +107,7 @@ final class AppleDesktopCaptionTests: XCTestCase {
     for keyword in ["首页", "日期", "本地"] { XCTAssertTrue(text.contains(keyword), text) }
   }
 
-  @MainActor func testRepeatedShortPhraseKeepsFirstAndLastWordsInTranscriptAndEligibleBubbles() async throws {
+  @MainActor func testRepeatedShortPhraseKeepsFirstAndLastWordsInTranscriptAndBubbles() async throws {
     let captions = try await replay(fixtureKey: "WORKDAY_APPLE_SPEECH_EDGES", name: "apple-edges")
     XCTAssertEqual(captions.map { $0.filter { !$0.isWhitespace && !$0.isPunctuation } },
                    ["开始继续继续下一个好了", "先把今天的日期记下来", "最后再确认一遍全部完成"])
@@ -135,7 +150,6 @@ final class AppleDesktopCaptionTests: XCTestCase {
     let records = model.captionHistory.records
     let ranges = model.localCaptions.lines.compactMap(\.recordingRange)
     let text = records.map(\.text)
-    print("FW925 replay:", text, ranges)
     XCTAssertFalse(mergedWhileSpeaking, "The second sentence must not appear in the first live row")
     XCTAssertTrue(separatedBeforeBudget, "The two rows should be readable before the budget sentence")
     XCTAssertEqual(records.count, 3, text.joined(separator: " | "))
@@ -147,6 +161,49 @@ final class AppleDesktopCaptionTests: XCTestCase {
     for (left, right) in zip(ranges, ranges.dropFirst()) {
       XCTAssertLessThanOrEqual(left.upperBound, right.lowerBound)
     }
+    await model.shutdown()
+  }
+
+  @MainActor func testFW925SentenceKeepsItsEndingInTheSameDesktopBubble() async throws {
+    guard #available(macOS 26, *), let path = ProcessInfo.processInfo.environment["WORKDAY_FW925_BUBBLE_SENTENCE"],
+          let output = ProcessInfo.processInfo.environment["WORKDAY_TEST_ROOT"]
+    else { throw XCTSkip("Requires the FW925 sentence replay and local Chinese speech model") }
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let root = URL(fileURLWithPath: output).appendingPathComponent(UUID().uuidString)
+    _ = NSApplication.shared
+    let model = AppModel(libraryURL: root)
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    model.localCaptions.configure(enabled: true, service: nil)
+    model.card.onStreamReset?(.started)
+    var firstBubble: DesktopCaption?
+    func checkPanel() {
+      let items = model.desktop.panel?.feedView.rootView.presentation.content.items.filter { !$0.isSoundFeedback } ?? []
+      if firstBubble == nil { firstBubble = items.first }
+      if let firstBubble, !items.isEmpty {
+        XCTAssertEqual(items.map(\.id), [firstBubble.id])
+        XCTAssertTrue(items[0].text.hasPrefix(firstBubble.text))
+      }
+    }
+    for offset in stride(from: 0, to: data.count, by: 200) {
+      let chunk = data.subdata(in: offset..<min(offset + 200, data.count))
+      model.card.onAudio?(chunk)
+      try await Task.sleep(for: .milliseconds(chunk.count / 2))
+      checkPanel()
+    }
+    model.card.onStreamReset?(.disconnected)
+    for _ in 0..<200 where model.localCaptions.phase != .waiting {
+      try await Task.sleep(for: .milliseconds(50))
+      checkPanel()
+    }
+    await model.voices.waitForStoppedTasks()
+    model.desktop.refresh()
+    checkPanel()
+    let items = try XCTUnwrap(model.desktop.panel?.feedView.rootView.presentation.content.items)
+    let text = try XCTUnwrap(items.first?.text)
+    XCTAssertEqual(items.count, 1)
+    XCTAssertTrue(text.contains("一半") && text.contains("小现象"), text)
     await model.shutdown()
   }
 
@@ -246,16 +303,18 @@ final class AppleDesktopCaptionTests: XCTestCase {
     let panel = try XCTUnwrap(model.desktop.panel)
     let host = panel.feedView
     XCTAssertTrue(panel.isVisible)
-    let visibleLines = lines.filter { model.voices.hasLiveVoice($0.voiceID) }.suffix(4)
+    let visibleLines = lines.suffix(DesktopCaptionState.maximumVisible)
     XCTAssertFalse(visibleLines.isEmpty)
     XCTAssertEqual(host.rootView.presentation.content.items.map(\.id), visibleLines.map(\.id))
-    let bubbleText = host.rootView.presentation.content.items.map(\.text)
-    XCTAssertEqual(bubbleText, try visibleLines.map { line in
-      try XCTUnwrap(model.captionHistory.records.first { $0.id == line.id }).text
-    })
+    for (bubble, line) in zip(host.rootView.presentation.content.items, visibleLines) {
+      XCTAssertFalse(bubble.text.isEmpty)
+      let record = try XCTUnwrap(model.captionHistory.records.first { $0.id == line.id })
+      XCTAssertEqual(record.text, line.captionText)
+      XCTAssertTrue(line.bubblePhrase?.text == bubble.text || bubble.text == record.text)
+    }
     let transcript = lines.map(\.text)
     await model.shutdown()
-    try lines.map(\.text).joined(separator: "\n").write(to: URL(fileURLWithPath: output)
+    try transcript.joined(separator: "\n").write(to: URL(fileURLWithPath: output)
       .appendingPathComponent(name + "-captions.txt"), atomically: true, encoding: .utf8)
     return transcript
   }

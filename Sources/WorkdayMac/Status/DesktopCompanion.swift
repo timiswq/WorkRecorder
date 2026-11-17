@@ -28,7 +28,8 @@ struct CaptionDisplay: Identifiable, Equatable {
   private var observers: [(NotificationCenter, NSObjectProtocol)] = []
   private var captions = DesktopCaptionState()
   private var lastTranscript: [LiveLine] = []
-  private var qualified: [String: LiveLine] = [:]
+  private var listening: PendingCaption?
+  private var displayLines: [String: LiveLine] = [:]
   private var retiredLineIDs = Set<String>()
   private var identityRevision = -1
   private let presentation = CaptionFeedPresentation()
@@ -38,6 +39,7 @@ struct CaptionDisplay: Identifiable, Equatable {
   private var sessionInactive = false
   private let checkFullScreen: @MainActor (CGDirectDisplayID) -> Bool
   private var fullScreenSample: (display: CGDirectDisplayID, time: Date, result: Bool)?
+  private var previewTask: Task<Void, Never>?
   private var previewStartedAt: Date?
   private var dismissedPreviewIDs = Set<String>()
   private var lastHoverPoint: NSPoint?
@@ -51,10 +53,14 @@ struct CaptionDisplay: Identifiable, Equatable {
   func start(model: AppModel) {
     guard self.model == nil else { return }
     self.model = model
+    presentation.geometryDidChange = { [weak self] in
+      guard let self, let panel, panel.isVisible, !rendered.items.isEmpty else { return }
+      updateDismissPanels(for: rendered.items, in: panel)
+      updateActions(for: rendered.items, pointer: NSEvent.mouseLocation)
+    }
     updateDisplays()
     lastTranscript = model.captionSelection.lines
     retiredLineIDs = Set(lastTranscript.map(\.id))
-    captions.update(rows: eligibleCaptions(), canPresent: false, now: Date())
     speechSubscription = model.captionSelection.$lines.dropFirst().sink { [weak self] lines in
       self?.refresh(transcript: lines)
     }
@@ -97,6 +103,9 @@ struct CaptionDisplay: Identifiable, Equatable {
     animationTask = nil
     hoverTask?.cancel()
     hoverTask = nil
+    previewTask?.cancel()
+    previewTask = nil
+    presentation.geometryDidChange = nil
     subscription = nil
     speechSubscription = nil
     for (center, token) in observers { center.removeObserver(token) }
@@ -110,7 +119,8 @@ struct CaptionDisplay: Identifiable, Equatable {
     panel = nil
     captions = DesktopCaptionState()
     lastTranscript = []
-    qualified = [:]
+    listening = nil
+    displayLines = [:]
     retiredLineIDs = []
     rendered = .init()
     presentation.update([], username: "", preview: false, animated: false)
@@ -125,6 +135,7 @@ struct CaptionDisplay: Identifiable, Equatable {
 
   func snooze() {
     snoozedUntil = Date().addingTimeInterval(15 * 60)
+    previewTask?.cancel()
     previewStartedAt = nil
     refresh()
   }
@@ -138,6 +149,17 @@ struct CaptionDisplay: Identifiable, Equatable {
     dismissedPreviewIDs.removeAll()
     previewStartedAt = now
     refresh()
+    // Run the preview on its phrase timestamps. The half-second status tick can skip an entire fade.
+    previewTask?.cancel()
+    previewTask = Task { [weak self] in
+      for time in CaptionPreview.changeTimes {
+        let delay = now.addingTimeInterval(time).timeIntervalSinceNow
+        guard delay > 0 else { continue }
+        do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+        guard self?.previewStartedAt == now else { return }
+        self?.refresh()
+      }
+    }
   }
 
   private func dismissCaption(id: String) {
@@ -145,13 +167,16 @@ struct CaptionDisplay: Identifiable, Equatable {
     if rendered.preview {
       dismissedPreviewIDs.insert(id)
     } else {
-      retiredLineIDs.insert(id)
+      if rendered.items.first(where: { $0.id == id })?.isSoundFeedback == true {
+        retiredLineIDs.insert(id)
+      }
       captions.dismiss(id: id)
     }
-    refresh()
+    refresh(animateStack: false)
   }
 
-  func refresh(now: Date = Date(), transcript: [LiveLine]? = nil, pointer: NSPoint = NSEvent.mouseLocation) {
+  func refresh(now: Date = Date(), transcript: [LiveLine]? = nil, pointer: NSPoint = NSEvent.mouseLocation,
+               animateStack: Bool = true) {
     guard let model else { return }
     let next = model.deviceStatus(at: now)
     if next != status {
@@ -168,20 +193,33 @@ struct CaptionDisplay: Identifiable, Equatable {
     let preferences = model.preferences.captions
     if let transcript {
       lastTranscript = transcript
-      retiredLineIDs.formIntersection(transcript.map(\.id))
+      var retained = Set(transcript.map(\.id))
+      if let pending = model.localCaptions.pendingSpeech ?? listening { retained.insert(pending.id) }
+      retiredLineIDs.formIntersection(retained)
     }
     let recheck = identityRevision != model.voices.captionIdentityRevision
     identityRevision = model.voices.captionIdentityRevision
-    let rows = transcript != nil || recheck ? eligibleCaptions() : nil
+    let rows = transcript != nil || recheck ? desktopRows() : nil
     let liveEnabled = preferences.enabled && snoozedUntil == nil && model.localCaptions.phase != .disabled
+    if let pending = model.localCaptions.pendingSpeech {
+      listening = pending
+    } else if let current = listening {
+      // Keep the listening cue until the stable phrase reaches the desktop.
+      let receiving = model.localCaptions.lastAudioAt.map { now.timeIntervalSince($0) < 1.5 } ?? false
+      if !receiving || !model.localCaptions.isAwaitingFinal(current.id) || captions.hasPublishedWords(for: current.id) {
+        listening = nil
+      }
+    }
+    let pending = listening.flatMap { retiredLineIDs.contains($0.id) ? nil : $0 }
     let needsDisplay = previewStartedAt != nil
-      || (liveEnabled && (rows?.isEmpty == false || !captions.items.isEmpty))
+      || (liveEnabled && (pending != nil || rows?.isEmpty == false || !captions.items.isEmpty))
     let screen = needsDisplay && !suppressed ? selectedScreen(preferred: preferences.displayID) : nil
     let allowedSpace = !suppressed && (!needsDisplay || preferences.showInFullScreen
       || screen.map { !isFullScreen(on: $0, at: now) } == true)
     let previewing = previewStartedAt != nil && allowedSpace
     let canPresent = allowedSpace && liveEnabled
     if !liveEnabled || suppressed { retiredLineIDs.formUnion(lastTranscript.map(\.id)) }
+    if !canPresent, let pending { retiredLineIDs.insert(pending.id) }
     if let rows {
       captions.update(rows: rows, canPresent: canPresent, now: now)
     } else {
@@ -194,41 +232,61 @@ struct CaptionDisplay: Identifiable, Equatable {
       : captions.items
     if !previewing {
       for index in content.indices {
-        guard let id = content[index].sourceLineID, let line = qualified[id],
-              let evidence = line.bubbleVoiceID else { continue }
-        if let reviewed = model.captionHistory.reviewedText(for: line) {
-          content[index].text = reviewed
-        }
+        guard let id = content[index].sourceLineID, let line = displayLines[id] else { continue }
+        let evidence = model.voices.usableVoiceID(for: line)
         let speaker = model.voices.captionSpeaker(lineID: line.id, evidenceID: evidence)
-        content[index].speakerLabel = speaker.label.captionTitle(using: preferences)
+        content[index].speakerLabel = speaker.title(using: preferences)
         content[index].isMine = speaker.label.isMine
         content[index].markedHere = speaker.markedHere
-          && (speaker.label.sampleID == evidence || speaker.label.isNegativeSample || evidence.hasPrefix("realtime:"))
+        content[index].hasSavedSample = speaker.hasSavedSample
         content[index].voiceID = evidence
         content[index].identityControls = speaker.controls
       }
     }
+    if !previewing, canPresent, let pending, !captions.hasPublishedWords(for: pending.id) {
+      if content.count == DesktopCaptionState.maximumVisible {
+        captions.dismiss(id: content.removeFirst().id)
+      }
+      content.append(DesktopCaption(id: pending.id, text: "", isFinal: false, receivedAt: pending.startedAt,
+                                    isSoundFeedback: true))
+    }
     render(
       content, username: previewing ? model.preferences.captions.resolvedUsername() : VoiceLabel.unknown,
       on: screen,
-      preview: previewing, immediately: suppressed || rows?.isEmpty == true)
+      preview: previewing, immediately: !allowedSpace || transcript?.isEmpty == true, pointer: pointer, animateStack: animateStack)
     updateActions(for: content, pointer: pointer)
   }
 
-  private func eligibleCaptions() -> [DesktopCaption] {
+  private func desktopRows() -> [DesktopCaption] {
     guard let model else { return [] }
-    qualified.removeAll(keepingCapacity: true)
-    return lastTranscript.compactMap { original in
-      let line = model.voices.presentationLine(original)
-      guard !retiredLineIDs.contains(line.id), !line.isSoundFeedback, LiveLine.containsSpeech(line.text),
-            model.voices.hasLiveVoice(line.bubbleVoiceID) else { return nil }
-      qualified[line.id] = line
-      return DesktopCaption(id: line.id, text: line.captionText, isFinal: line.isFinal,
-                            sourceLineID: line.id, receivedAt: line.receivedAt)
+    displayLines.removeAll(keepingCapacity: true)
+    let lines = lastTranscript.map(model.voices.presentationLine)
+    for line in lines where !retiredLineIDs.contains(line.id) {
+      displayLines[line.id] = line
     }
+    return captions.rows(for: lines, retired: retiredLineIDs, speakersDiffer: { previous, line in
+      let voices = model.voices
+      if !LiveLine.containsSpeech(previous.text), line.bubblePhrase?.carriedText.isEmpty == false { return false }
+      let older = voices.captionSpeaker(lineID: previous.id, evidenceID: previous.bubbleVoiceID).label
+      let newer = voices.captionSpeaker(lineID: line.id, evidenceID: line.bubbleVoiceID).label
+      if older.isMine && newer.isMine { return false }
+      if (older.isMine && newer.excluded) || (newer.isMine && older.excluded) { return true }
+      if let left = older.group, let right = newer.group { return left != right }
+      // A missing voice on either half cannot establish a speaker change.
+      guard voices.hasLiveVoice(previous.bubbleVoiceID), voices.hasLiveVoice(line.bubbleVoiceID) else { return false }
+      // Words carried across an ASR cut refer to the same audio even when the window IDs change.
+      return line.bubblePhrase?.carriedText.isEmpty != false && previous.bubbleVoiceID != line.bubbleVoiceID
+    }, readable: { line, published in
+      if line.isFinal, line.textSource == .local, line.bubblePhrase?.continuesPrevious != true,
+         line.captionText.hasPrefix(published) {
+        return line.captionText
+      }
+      return line.bubblePhrase?.text ?? line.stableCloudText ?? line.text
+    })
   }
 
   private func clearVoiceActions() {
+    presentation.identityActionID = nil
     for action in voiceActions.values { action.detach() }
     voiceActions.removeAll()
   }
@@ -294,12 +352,12 @@ struct CaptionDisplay: Identifiable, Equatable {
     guard let panel, panel.isVisible,
           let (caption, bubble) = hoveredCaption(in: panel, captions: captions, at: pointer) else {
       // Preserve the hovered opacity while the last sentence finishes fading out.
-      if !captions.isEmpty { panel?.feedView.alphaValue = 1 }
+      if !captions.isEmpty { panel?.setHovered(false) }
       clearHoverControls()
       return
     }
     // Fade the entire caption feed, keeping its separate native action buttons legible.
-    panel.feedView.alphaValue = 0.65
+    panel.setHovered(true)
     lastHoverPoint = pointer
     // Reflow can replace a hovered sentence. Wait for re-entry before arming its replacement.
     if closeButton?.captionID != caption.id, previousHoverPoint.map(bubble.contains) == true {
@@ -318,13 +376,14 @@ struct CaptionDisplay: Identifiable, Equatable {
       closeButton = button
     }
     closeButton?.show(in: panel, bubble: bubble, sentence: caption.text)
-    guard let turn = caption.voiceID, let controls = caption.identityControls,
-      let anchor = panel.anchor(for: caption.actionAnchor), panel.frame.contains(anchor),
+    guard let source = caption.sourceLineID, let controls = caption.identityControls,
+      let anchor = panel.anchor(for: caption.actionAnchor), bubble.insetBy(dx: -1, dy: -1).contains(anchor),
       anchor.width >= CaptionVoiceActions.width(for: controls) - 1
     else {
       clearVoiceActions()
       return
     }
+    let turn = caption.voiceID ?? VoiceRecognition.captionMark(source, evidence: nil)
     let actions: CaptionVoiceActions
     if let existing = voiceActions[caption.id], existing.turnID == turn,
       existing.controls == controls
@@ -338,13 +397,14 @@ struct CaptionDisplay: Identifiable, Equatable {
       actions = CaptionVoiceActions(
         turn: turn, controls: controls, sentence: caption.text)
       voiceActions[caption.id] = actions
-      actions.perform = { [weak self, weak actions] action in
-        guard let self, let actions, self.voiceActions[caption.id] === actions else { return }
-        self.apply(action, to: caption)
-      }
+    }
+    actions.perform = { [weak self, weak actions] action in
+      guard let self, let actions, self.voiceActions[caption.id] === actions else { return }
+      self.apply(action, to: caption)
     }
     actions.canUndo = caption.markedHere
     actions.show(in: panel, at: anchor)
+    presentation.identityActionID = caption.id
   }
 
   private func trackHover() {
@@ -364,26 +424,25 @@ struct CaptionDisplay: Identifiable, Equatable {
   private func apply(_ action: CaptionVoiceActions.Action, to caption: DesktopCaption) {
     guard let model, let current = rendered.items.first(where: { $0.id == caption.id }),
           current.voiceID == caption.voiceID, current.identityControls == caption.identityControls,
-          let id = caption.sourceLineID, let line = qualified[id],
-          let evidence = line.bubbleVoiceID, evidence == caption.voiceID, model.voices.hasLiveVoice(evidence) else { return }
+          let id = current.sourceLineID, id == caption.sourceLineID, let line = displayLines[id] else { return }
+    let evidence = model.voices.usableVoiceID(for: line)
+    guard evidence == caption.voiceID else { return }
     let speaker = model.voices.captionSpeaker(lineID: line.id, evidenceID: evidence)
     guard speaker.controls == caption.identityControls else { return }
     switch action {
     case .confirm, .reject:
-      guard let packets = line.bubblePackets else { return }
-      model.voices.markBubble(lineID: line.id, evidence: evidence, packets: packets, mine: action == .confirm)
-    case .undo where speaker.markedHere:
-      let mark = VoiceRecognition.captionMark(line.id, evidence: evidence)
+      model.voices.setCaptionMark(lineID: id, mine: action == .confirm, evidence: evidence, packets: line.bubblePackets)
+    case .undo:
+      guard let mark = speaker.markID else { return }
       if speaker.label.isMine { model.voices.undoConfirmation(for: mark) }
       else { model.voices.setExcluded(false, for: mark) }
-    default: return
     }
     refresh()
   }
 
   private func render(
     _ content: [DesktopCaption], username: String, on screen: NSScreen?, preview: Bool,
-    immediately: Bool
+    immediately: Bool, pointer: NSPoint, animateStack: Bool
   ) {
     guard !content.isEmpty, let screen else {
       hide(immediately: immediately)
@@ -392,7 +451,7 @@ struct CaptionDisplay: Identifiable, Equatable {
     let frame = CaptionPlacement.frame(in: screen.visibleFrame)
     if panel == nil {
       let feed = CaptionFeedView(
-        presentation: presentation,
+        presentation: presentation, meter: model?.audioMeter,
         correct: { [weak self] caption, action in self?.apply(action, to: caption) },
         dismiss: { [weak self] id in self?.dismissCaption(id: id) })
       panel = CaptionPanel(frame: frame, feed: feed)
@@ -405,13 +464,15 @@ struct CaptionDisplay: Identifiable, Equatable {
       // A reopened panel must not animate its previously hidden rows back into view.
       presentation.update(
         content, username: username, preview: preview,
-        animated: wasPresenting && panel.isVisible && !(preview && closeButton != nil))
+        animated: wasPresenting && panel.isVisible && rendered.preview == preview,
+        animateStack: animateStack && !panel.frame.contains(pointer) && lastHoverPoint == nil)
       rendered = next
     }
     if !wasPresenting || !panel.isVisible {
-      if !panel.isVisible { panel.alphaValue = preview ? 0 : 1 }
+      let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+      if !panel.isVisible { panel.alphaValue = !reduceMotion && (preview || content.last?.isSoundFeedback == true) ? 0.45 : 1 }
       panel.orderFrontRegardless()
-      animateAlpha(to: 1, duration: preview ? 0.18 : 0)
+      animateAlpha(to: 1, duration: !reduceMotion && panel.alphaValue < 1 ? 0.12 : 0)
       trackHover()
     }
     updateDismissPanels(for: content, in: panel)
@@ -425,7 +486,7 @@ struct CaptionDisplay: Identifiable, Equatable {
     if immediately { presentation.update([], username: "", preview: false, animated: false) }
     hoverTask?.cancel()
     hoverTask = nil
-    animateAlpha(to: 0, duration: immediately ? 0 : 0.22)
+    animateAlpha(to: 0, duration: immediately ? 0 : 0.12)
   }
 
   private func animateAlpha(to target: CGFloat, duration: Double) {
@@ -447,7 +508,7 @@ struct CaptionDisplay: Identifiable, Equatable {
       while !Task.isCancelled {
         guard let self, let panel, self.transition == generation else { return }
         let progress = min(1, (ProcessInfo.processInfo.systemUptime - started) / duration)
-        let eased = progress * progress * (3 - 2 * progress)
+        let eased = CaptionTransition.progress(progress, duration: 1)
         panel.alphaValue = initial + (target - initial) * eased
         if progress >= 1 {
           if target == 0 { panel.orderOut(nil) }

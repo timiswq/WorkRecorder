@@ -463,6 +463,222 @@ final class DesktopWindowTests: XCTestCase {
     XCTAssertNotEqual(first.failed, second.failed, "同一时间与错误下，面板仍应显示原句")
   }
 
+  @MainActor func testLateSentenceCutAppendsUnreadWordsToTheVisibleBubble() throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+
+    let start = Date()
+    var first = LiveLine(id: "first", segment: 0, sentence: 0, text: "明天继续", isFinal: false, receivedAt: start,
+                         bubblePhrase: .init(text: "明天继续", continuesPrevious: false))
+    model.desktop.refresh(transcript: [try withVoice(first, in: model)])
+    let initial = try XCTUnwrap(model.desktop.panel?.feedView.rootView.presentation.content.items.first)
+    first.text = "明天，"
+    first.isFinal = true
+    let second = LiveLine(id: "second", segment: 0, sentence: 1, text: "继续开会", isFinal: true, receivedAt: start.addingTimeInterval(3),
+                          bubblePhrase: .init(text: "开会", continuesPrevious: true, carriedText: "继续"))
+    model.desktop.refresh(transcript: try [first, second].map { try withVoice($0, in: model) })
+    let feed = try XCTUnwrap(model.desktop.panel?.feedView.rootView.presentation)
+    XCTAssertEqual(feed.content.items.map(\.text), ["明天继续开会"])
+    let result = try XCTUnwrap(feed.content.items.first)
+    XCTAssertEqual(result.id, initial.id)
+    XCTAssertEqual(result.receivedAt, initial.receivedAt)
+    XCTAssertEqual(result.phrases.first, initial.phrases.first)
+    XCTAssertEqual(result.sourceLineID, second.id)
+  }
+
+  @MainActor func testRetractedDraftAndFullFinalKeepOneBubbleAndOneHistoryRecord() throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+
+    let start = Date()
+    let prefix = "还会出现说了一半，结果没有出现了和文字"
+    let full = prefix + "的小现象。"
+    var first = LiveLine(id: "draft", segment: 0, sentence: 0, text: prefix, isFinal: false,
+                         recognitionRange: 0..<6400, receivedAt: start)
+    first = try withVoice(first, in: model)
+    model.captionHistory.accept(first, evidenceID: first.bubbleVoiceID)
+    model.desktop.refresh(transcript: [first])
+    let feed = try XCTUnwrap(model.desktop.panel?.feedView.rootView.presentation)
+    let initial = try XCTUnwrap(feed.content.items.first)
+    first.text = ""
+    first.isFinal = true
+    first.draftVoice = nil
+    model.captionHistory.accept(first, evidenceID: nil)
+    model.desktop.refresh(transcript: [first])
+    XCTAssertEqual(feed.content.items.map(\.text), [prefix])
+    let final = try withVoice(LiveLine(id: "whole", segment: 0, sentence: 1,
+                                       text: full.replacingOccurrences(of: "一半，", with: "一半 ，"), isFinal: true,
+                                       recognitionRange: 0..<8700, receivedAt: start.addingTimeInterval(3)), in: model)
+    model.captionHistory.accept(final, evidenceID: final.voiceID)
+    model.desktop.refresh(transcript: [first, final])
+    model.desktop.refresh(transcript: [first, final])
+    let bubble = try XCTUnwrap(feed.content.items.first)
+    XCTAssertEqual(feed.content.items.map(\.text), [full])
+    XCTAssertEqual(bubble.id, initial.id)
+    XCTAssertEqual(bubble.receivedAt, start)
+    XCTAssertEqual(bubble.phrases.first, initial.phrases.first)
+    XCTAssertEqual(bubble.phrases.last?.text, "的小现象。")
+    XCTAssertEqual(bubble.sourceLineID, final.id)
+    XCTAssertEqual(model.captionHistory.records.map(\.id), [final.id])
+  }
+
+  @MainActor func testNativeClickSurfacesFollowTheMovingStackAndDetachAtDismissal() async throws {
+    _ = NSApplication.shared
+    let model = isolatedModel()
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    defer { model.desktop.stop() }
+    let first = try withVoice(LiveLine(id: "older", segment: 0, sentence: 0, text: "我先确认。", isFinal: true), in: model)
+    let next = try withVoice(LiveLine(id: "newer", segment: 0, sentence: 1, text: "稍后发给大家。", isFinal: true), in: model)
+    model.desktop.refresh(transcript: [first], pointer: .zero)
+    let panel = try XCTUnwrap(model.desktop.panel)
+    let oldSurface = try dismissSurface(for: first.id, in: panel)
+    model.desktop.refresh(transcript: [first, next], pointer: .zero)
+    for _ in 0..<6 {
+      try await Task.sleep(for: .milliseconds(24))
+      for id in [first.id, next.id] {
+        let rect = try XCTUnwrap(panel.anchor(for: id)).integral
+        let surface = try dismissSurface(for: id, in: panel)
+        XCTAssertEqual(surface.frame.minY, rect.minY, accuracy: 1)
+        XCTAssertEqual(surface.frame.height, rect.height, accuracy: 1)
+      }
+    }
+    model.desktop.refresh(transcript: [next], pointer: .zero)
+    XCTAssertFalse(oldSurface.isVisible)
+    XCTAssertNil(oldSurface.parent)
+  }
+
+  @MainActor func testInterruptedRowExitReversesAndReducedMotionSettlesImmediately() async throws {
+    let feed = CaptionFeedPresentation()
+    var caption = DesktopCaption(id: "stable", text: "", isFinal: false, isSoundFeedback: true)
+    feed.update([caption], username: "", preview: false, animated: false)
+    caption.text = "明天继续"
+    caption.isSoundFeedback = false
+    feed.update([caption], username: "", preview: false, reduceMotion: true)
+    XCTAssertEqual(feed.rows.first?.expansion.value(at: feed.frameTime), 1)
+    feed.update([], username: "", preview: false, reduceMotion: false)
+    try await Task.sleep(for: .milliseconds(40))
+    feed.update([caption], username: "", preview: false, reduceMotion: false)
+    let returning = try XCTUnwrap(feed.rows.first?.presence)
+    XCTAssertGreaterThan(returning.from, 0)
+    XCTAssertLessThan(returning.from, 1)
+    XCTAssertEqual(returning.to, 1)
+    XCTAssertEqual(feed.rows.map(\.id), [caption.id])
+    feed.update([], username: "", preview: false, reduceMotion: true)
+    XCTAssertTrue(feed.rows.isEmpty)
+  }
+
+  @MainActor func testNativeCaptionTransitionSequence() async throws {
+    _ = NSApplication.shared
+    let feed = CaptionFeedPresentation()
+    let meter = LiveAudioMeter()
+    let panel = CaptionPanel(frame: CaptionPlacement.frame(in: try XCTUnwrap(NSScreen.main).visibleFrame),
+                             feed: CaptionFeedView(presentation: feed, meter: meter))
+    panel.orderBack(nil)
+    defer { panel.close() }
+    let start = Date()
+    var pages = CaptionPages()
+    let cue = DesktopCaption(id: "speech", text: "", isFinal: false, receivedAt: start, isSoundFeedback: true)
+    var sentence = DesktopCaption(id: cue.id, text: "我们先确认", isFinal: false, sourceLineID: "speaker", receivedAt: start)
+    let directory = ProcessInfo.processInfo.environment["WORKDAY_CAPTION_MOTION_FRAMES"].map { URL(fileURLWithPath: $0) }
+    if let directory { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+    func present(_ rows: [DesktopCaption], animated: Bool = true) {
+      feed.update(rows, username: "发言人", preview: false, animated: animated)
+    }
+    func spoken() -> DesktopCaption {
+      var item = pages.pages[0]
+      item.identityControls = .confirm
+      item.speakerLabel = "陈晨"
+      return item
+    }
+    let packets = try ProcessInfo.processInfo.environment["WORKDAY_APPLE_SPEECH_EDGES"].map {
+      try Data(contentsOf: URL(fileURLWithPath: $0))
+    }
+    var widths: [CGFloat] = []
+    var rightEdge: CGFloat?
+    let clock = ContinuousClock()
+    let origin = clock.now
+    for frame in 0...105 {
+      try await clock.sleep(until: origin + .milliseconds(frame * 33))
+      let offset = frame * 120
+      if let packets, frame < 45, offset + 120 <= packets.count {
+        meter.append(packets.subdata(in: offset..<offset + 120), offset: offset)
+      }
+      switch frame {
+      case 0: present([cue], animated: false)
+      case 17, 31, 45:
+        if frame == 31 { sentence.text += "周五下午的交付时间，" }
+        if frame == 45 { sentence.text += "再把结果发给大家。"; sentence.isFinal = true }
+        pages.receive(sentence, now: Date())
+        present([spoken()])
+      case 62:
+        let reply = DesktopCaption(id: "reply", text: "好的，周五见。", isFinal: true, speakerLabel: "林悦",
+                                   identityControls: .confirm, receivedAt: start)
+        present([spoken(), reply])
+      case 81: present(Array(feed.content.items.suffix(1)))
+      case 99: present([])
+      default: break
+      }
+      if let directory {
+        try png(panel.feedView).write(to: directory.appendingPathComponent(String(format: "%03d.png", frame)))
+      }
+      if (16...29).contains(frame) {
+        let rect = try XCTUnwrap(panel.anchor(for: cue.id))
+        if let rightEdge { XCTAssertEqual(rect.maxX, rightEdge, accuracy: 1) }
+        rightEdge = rect.maxX
+        widths.append(rect.width)
+      }
+      if frame == 43 { XCTAssertEqual(feed.content.items.map(\.text), [sentence.text]) }
+      if frame == 58 { XCTAssertEqual(feed.content.items.first?.phrases.first?.text, "我们先确认") }
+    }
+    let compact = try XCTUnwrap(widths.first), expanded = try XCTUnwrap(widths.last)
+    XCTAssertGreaterThan(expanded, compact + 100)
+    if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+      XCTAssertTrue(widths.contains { $0 > compact + 1 && $0 < expanded - 1 }, "收音提示应从同一右边缘连续展开")
+    }
+    XCTAssertTrue(feed.content.items.isEmpty)
+  }
+
+  @MainActor func testOnlyNewPhrasePixelsFadeInOnTheNativePanel() async throws {
+    guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { throw XCTSkip("系统已启用减弱动态效果") }
+    _ = NSApplication.shared
+    let feed = CaptionFeedPresentation()
+    var pages = CaptionPages()
+    var row = DesktopCaption(id: "fade", text: "我们周五下午", isFinal: false)
+    pages.receive(row, now: Date().addingTimeInterval(-2))
+    feed.update(pages.pages, username: "发言人", preview: false, animated: false)
+    let screen = try XCTUnwrap(NSScreen.main)
+    let panel = CaptionPanel(frame: CaptionPlacement.frame(in: screen.visibleFrame), feed: CaptionFeedView(presentation: feed))
+    panel.orderBack(nil)
+    defer { panel.close() }
+    let host = panel.feedView
+    try await Task.sleep(for: .milliseconds(80))
+    let before = try png(host)
+
+    // Schedule the release just ahead of the test clock so the first snapshot is reliably before onset.
+    let onset = Date().addingTimeInterval(0.4)
+    row.text += "三点开会"
+    pages.receive(row, now: onset)
+    feed.update(pages.pages, username: "发言人", preview: false, animated: false)
+    let waiting = try png(host)
+    XCTAssertEqual(before, waiting, "已有短语的位置和亮度应保持一致")
+    try await Task.sleep(for: .milliseconds(750))
+    let finished = try png(host)
+    XCTAssertNotEqual(waiting, finished, "没有后续识别回调时，新短语也必须完成淡入")
+    if ProcessInfo.processInfo.environment["WORKDAY_DESKTOP_SNAPSHOTS"] == "1",
+       let output = ProcessInfo.processInfo.environment["WORKDAY_TEST_ROOT"] {
+      let root = URL(fileURLWithPath: output)
+      try before.write(to: root.appendingPathComponent("phrase-before.png"))
+      try finished.write(to: root.appendingPathComponent("phrase-after.png"))
+    }
+  }
+
   @MainActor func testNativeMenuAndCaptionSnapshots() throws {
     guard ProcessInfo.processInfo.environment["WORKDAY_DESKTOP_SNAPSHOTS"] == "1" else { return }
     _ = NSApplication.shared
@@ -495,7 +711,7 @@ final class DesktopWindowTests: XCTestCase {
       caption.setFrameSize(NSSize(width: 360, height: 248))
       try save(caption, named: "caption-\(name)")
       presentation.update(
-        CaptionPreview.items(at: 0), username: "青木", preview: false, animated: false)
+        CaptionPreview.items(at: 0.8), username: "青木", preview: false, animated: false)
       try save(caption, named: "caption-single-\(name)")
       presentation.update(
         (0..<4).map {

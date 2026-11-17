@@ -101,8 +101,22 @@ struct VoiceLabel: Equatable {
         turn TEXT PRIMARY KEY REFERENCES turns(id), generation TEXT NOT NULL,
         start_frame INTEGER NOT NULL, end_frame INTEGER NOT NULL, packet_start_frame INTEGER NOT NULL,
         quality BLOB NOT NULL, status TEXT NOT NULL, reason TEXT NOT NULL, track INTEGER NOT NULL,
-        owner_score REAL NOT NULL, negative_score REAL NOT NULL, packets BLOB NOT NULL, pcm BLOB);
+        owner_score REAL NOT NULL, negative_score REAL NOT NULL, packets BLOB NOT NULL, pcm BLOB,
+        can_enroll INTEGER NOT NULL DEFAULT 0);
       """)
+    try transaction {
+      var hasEligibility = false
+      try query("PRAGMA table_info(realtime_evidence)") {
+        if String(cString: sqlite3_column_text($0, 1)) == "can_enroll" { hasEligibility = true }
+      }
+      if !hasEligibility {
+        // Older rolling windows did not record whether their audio belonged entirely to this caption.
+        try exec("ALTER TABLE realtime_evidence ADD COLUMN can_enroll INTEGER NOT NULL DEFAULT 0")
+        // The old app saved PCM only on explicit feedback for a fully contained window.
+        try query("UPDATE realtime_evidence SET can_enroll=1 WHERE pcm IS NOT NULL AND reason NOT IN (?,?)",
+                  [.text(LiveVoiceReason.mixedSpeakers.rawValue), .text(LiveVoiceReason.staleEvidence.rawValue)])
+      }
+    }
     try refresh()
   }
   deinit { sqlite3_close(db) }
@@ -275,6 +289,17 @@ struct VoiceLabel: Equatable {
     return found
   }
 
+  /// A stored rolling voice can identify the speaker even when its window includes the preceding sentence.
+  func canEnrollCaption(_ id: String) throws -> Bool {
+    guard try hasLiveVoice(id) else { return false }
+    guard id.hasPrefix("realtime:") else { return true }
+    var eligible = false
+    try query("SELECT can_enroll FROM realtime_evidence WHERE turn=?", [.text(id)]) {
+      eligible = sqlite3_column_int($0, 0) != 0
+    }
+    return eligible
+  }
+
   /// A final can reuse its already indexed draft. Count that interval exactly once.
   func creditFinalDraft(_ id: String, seconds: Double) throws {
     try transaction {
@@ -314,7 +339,7 @@ struct VoiceLabel: Equatable {
       }
       var group: Int64?
       var newReference: [Float]?
-      let voice = voice.flatMap { $0.allSatisfy(\.isFinite) && $0.contains(where: { $0 != 0 }) ? $0 : nil }
+      let voice = (live && seconds < 2 ? nil : voice).flatMap { $0.allSatisfy(\.isFinite) && $0.contains(where: { $0 != 0 }) ? $0 : nil }
       if let voice {
         let scores = references.map { ($0.key, SpeakerEncoder.similarity($0.value, voice)) }.sorted
         { $0.1 > $1.1 }
@@ -421,21 +446,21 @@ struct VoiceLabel: Equatable {
   }
 
   func persistRealtimeEvidence(id: String, source: String, evidence: LiveVoiceEvidence,
-                               decision: LiveIdentityDecision, savePCM: Bool = false) throws {
+                               decision: LiveIdentityDecision, canEnroll: Bool, savePCM: Bool = false) throws {
     guard let voice = evidence.voice, evidence.quality.usableForIdentity else { return }
     try record(id: id, source: source, live: true,
                seconds: Double(evidence.range.count) / 16_000, voice: voice, countDuration: false)
     let quality = try JSONEncoder().encode(evidence.quality)
     try query("""
       INSERT INTO realtime_evidence(turn,generation,start_frame,end_frame,packet_start_frame,quality,
-        status,reason,track,owner_score,negative_score,packets,pcm) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(turn) DO UPDATE SET status=excluded.status,reason=excluded.reason,
+        status,reason,track,owner_score,negative_score,packets,pcm,can_enroll) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(turn) DO UPDATE SET can_enroll=excluded.can_enroll,status=excluded.status,reason=excluded.reason,
         owner_score=excluded.owner_score,negative_score=excluded.negative_score,pcm=coalesce(realtime_evidence.pcm,excluded.pcm)
       """, [.text(id), .text(evidence.generation.uuidString), .int(Int64(evidence.range.lowerBound)),
              .int(Int64(evidence.range.upperBound)), .int(Int64(evidence.packetStartFrame)), .packets(quality),
              .text(decision.status.rawValue), .text(decision.reason.rawValue), .int(Int64(decision.track)),
              .seconds(Double(decision.ownerScore)), .seconds(Double(decision.negativeScore)),
-             .packets(evidence.packets), savePCM ? .vector(evidence.pcm) : .null])
+             .packets(evidence.packets), savePCM ? .vector(evidence.pcm) : .null, .int(canEnroll ? 1 : 0)])
   }
 
   func liveEvidenceCount() throws -> Int {
@@ -468,12 +493,9 @@ struct VoiceLabel: Equatable {
     }
     return result
   }
-  func confirm(_ id: String, utterance: String? = nil, pendingOnly: Bool = false) throws {
+  func confirm(_ id: String, utterance: String? = nil) throws {
     try transaction {
       if let utterance, try label(utterance)?.excluded == true { return }
-      if pendingOnly {
-        guard let utterance, try label(utterance) == .forUtterance(mine: true) else { return }
-      }
       guard let label = try label(id), label.canConfirm || label.canAddSample || label.sampleID != nil
       else { return }
       if id.hasPrefix("caption:") {
@@ -492,7 +514,7 @@ struct VoiceLabel: Equatable {
     if let utterance {
       try query("UPDATE OR IGNORE owner_samples SET caption=? WHERE turn=? AND caption IS NULL",
                 [.text(utterance), .text(id)])
-      // Only clear a pending mark if this exact caption is now bound to the sample.
+      // Only clear the separate utterance mark if this exact caption is now bound to the sample.
       try query("DELETE FROM utterance_marks WHERE turn=? AND mine=1 AND EXISTS (SELECT 1 FROM owner_samples WHERE turn=? AND caption=?)",
                 [.text(utterance), .text(id), .text(utterance)])
     }
@@ -514,14 +536,10 @@ struct VoiceLabel: Equatable {
     }
   }
   /// The mark is immediate. Only its own indexed, single-speaker audio can become a counterexample.
-  func markNotMine(_ mark: String, evidence: String?, pendingOnly: Bool = false) throws {
+  func markNotMine(_ mark: String, evidence: String?) throws {
     try transaction {
-      if pendingOnly {
-        guard try label(mark) == .forUtterance(mine: false) else { return }
-      } else {
-        if let current = try label(mark), current.isMine && !current.canAddSample { return }
-        try markUtterance(mark, mine: false)
-      }
+      if let current = try label(mark), current.isMine && !current.canAddSample { return }
+      try markUtterance(mark, mine: false)
       guard let evidence else { return }
       try attachNegativeSample(mark, evidence: evidence)
     }
@@ -553,9 +571,9 @@ struct VoiceLabel: Equatable {
   /// A correction replaces only this bubble's feedback and its exact local audio sample.
   func setCaptionMark(_ mark: String, mine: Bool, evidence: String?, packets: Data? = nil) throws {
     try transaction {
+      let evidence = try evidence.flatMap { try canEnrollCaption($0) ? $0 : nil }
       if let packets {
-        guard let evidence, try hasLiveVoice(evidence),
-              (4000...240000).contains(packets.count), packets.count.isMultiple(of: 40) else {
+        guard evidence != nil, SpeakerEncoder.acceptsLivePacketCount(packets.count) else {
           throw WorkdayError.invalid("未找到这段语音的可用声纹")
         }
       }

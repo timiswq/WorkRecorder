@@ -23,6 +23,54 @@ final class LiveBubbleFeedTests: XCTestCase {
     XCTAssertEqual(feed.items.map(\.sourceLineID), [second.id, reply.id])
   }
 
+  func testResegmentedCaptionRecoversOnlyUnreadWordsWhenThePrecedingRowIsUnavailable() {
+    let initial = line(0, "明天继")
+    var left = line(0, "明天", final: true)
+    left.bubblePhrase = .init(text: "明天继续", continuesPrevious: false)
+    var right = line(1, "继续开会", final: true)
+    right.bubblePhrase = .init(text: "开会", continuesPrevious: true, carriedText: "继续")
+    func apply(_ lines: [LiveLine], eligible: Set<String>, to state: inout DesktopCaptionState) {
+      let rows = state.rows(for: lines, speakersDiffer: { _, _ in false }) { line, _ in
+        eligible.contains(line.id) ? line.bubblePhrase?.text ?? line.text : nil
+      }
+      state.update(rows: rows, canPresent: true, now: now)
+    }
+    var shown = DesktopCaptionState()
+    apply([initial], eligible: [initial.id], to: &shown)
+    apply([left, right], eligible: [right.id], to: &shown)
+    XCTAssertEqual(shown.items.map(\.text), ["明天继续开会"])
+    XCTAssertEqual(shown.items.map(\.id), [initial.id])
+
+    var neverShown = DesktopCaptionState()
+    apply([left, right], eligible: [right.id], to: &neverShown)
+    XCTAssertEqual(neverShown.items.map(\.text), ["继续开会"])
+    XCTAssertEqual(neverShown.items.map(\.id), [right.id])
+  }
+
+  func testRepeatedWordsOnSeparateAudioDoNotJoinARetractedDraft() {
+    var state = DesktopCaptionState()
+    var left = line(0, "好的")
+    left.recognitionRange = 0..<600
+    state.update(lines: [left], canPresent: true, now: now)
+    left.text = ""
+    left.isFinal = true
+    var right = line(1, "好的，我们开始。", final: true)
+    right.recognitionRange = 2000..<4000
+    state.update(lines: [left, right], canPresent: true, now: now)
+    XCTAssertEqual(state.items.map(\.text), ["好的", "好的，我们开始。"])
+  }
+
+  func testLateFinalSuffixCanUseTheSecondLineOfACompactBubble() throws {
+    var state = DesktopCaptionState()
+    let first = line(0, "一起讨论", final: true)
+    state.update(lines: [first], canPresent: true, now: now)
+    let initial = try XCTUnwrap(state.items.first?.phrases.first)
+    state.update(lines: [line(0, "一起讨论进度。", final: true)], canPresent: true, now: now.addingTimeInterval(1))
+    XCTAssertEqual(state.items.map(\.text), ["一起讨论进度。"])
+    XCTAssertEqual(state.items.first?.phrases.first, initial)
+    XCTAssertEqual(state.items.first?.phrases.last?.line, 1)
+  }
+
   func testSubstantiveContinuationAndLateFinalAfterTenSeconds() {
     var feed = DesktopCaptionState()
     let draft = line(0, "今天")
@@ -38,7 +86,7 @@ final class LiveBubbleFeedTests: XCTestCase {
     XCTAssertEqual(feed.items.map(\.text), [final.text])
   }
 
-  func testLateCorrectionUpdatesItsOwnBubbleWithoutMovingTheNewerOne() {
+  func testLateCorrectionCannotRewriteEitherVisibleBubble() {
     var feed = DesktopCaptionState()
     let meeting = line(0, "开会")
     let testing = line(1, "再测试")
@@ -50,25 +98,25 @@ final class LiveBubbleFeedTests: XCTestCase {
     feed.update(lines: [line(0, "开完会。", final: true), line(1, "再测试。明天看结果")], canPresent: true, now: now)
     XCTAssertEqual(feed.items.map(\.id), ids)
     XCTAssertEqual(feed.items.map(\.sourceLineID), ids)
-    XCTAssertEqual(feed.items.map(\.text), ["开完会。", "再测试。明天看结果"])
+    XCTAssertEqual(feed.items.map(\.text), ["开会", "再测试。明天看结果"])
     XCTAssertEqual(feed.items.map(\.isFinal), [true, false])
     feed.update(lines: [line(0, "开完会了。", final: true), line(1, "再测试。明天看结果")], canPresent: true, now: now)
     XCTAssertEqual(feed.items.map(\.id), ids)
-    XCTAssertEqual(feed.items.first?.text, "开完会了。")
+    XCTAssertEqual(feed.items.first?.text, "开会")
   }
 
   func testRepunctuationAcrossSnapshotsKeepsTheEntireSegmentInOneBubble() {
     var feed = DesktopCaptionState()
-    for text in ["看 0.3.2", "看 0.3.2。开始测试。", "看 0.3.2，开始测试？下一项"] {
+    for (text, expected) in [("看 0.3.2", "看 0.3.2"), ("看 0.3.2。开始测试。", "看 0.3.2。开始测试。"),
+                             ("看 0.3.2，开始测试？下一项", "看 0.3.2。开始测试。")] {
       let snapshot = line(0, text)
       feed.update(lines: [snapshot], canPresent: true, now: now)
-      XCTAssertEqual(feed.items, [
-        DesktopCaption(id: snapshot.id, text: text, isFinal: false, sourceLineID: snapshot.id)
-      ])
+      XCTAssertEqual(feed.items.map(\.id), [snapshot.id])
+      XCTAssertEqual(feed.items.map(\.text), [expected])
     }
   }
 
-  func testFinalRetractionRemovesOnlyItsOwnBubble() {
+  func testFinalRetractionLeavesTheReadWordsVisible() {
     var feed = DesktopCaptionState()
     let next = line(1, "下一段")
     feed.update(lines: [line(0, "旧稿"), next], canPresent: true, now: now)
@@ -76,19 +124,19 @@ final class LiveBubbleFeedTests: XCTestCase {
     XCTAssertEqual(feed.items.map(\.text), ["旧稿", "下一段"])
     feed.update(lines: [line(0, "", final: true), next], canPresent: true, now: now)
     feed.update(lines: [line(0, "迟到的草稿"), next], canPresent: true, now: now)
-    XCTAssertEqual(feed.items.map(\.id), [next.id])
+    XCTAssertEqual(feed.items.map(\.text), ["旧稿", next.text])
   }
 
-  func testEmptyAppleDraftDisappearsAndItsCorrectionReturnsToTheSamePosition() {
+  func testEmptyAppleDraftKeepsTheVisiblePageAndItsPosition() {
     var feed = DesktopCaptionState()
     let next = line(1, "再确认")
     feed.update(lines: [line(0, "继续"), next], canPresent: true, now: now)
     feed.update(lines: [line(0, ""), next], canPresent: true, now: now)
-    XCTAssertEqual(feed.items.map(\.id), [next.id])
+    XCTAssertEqual(feed.items.map(\.text), ["继续", next.text])
     let corrected = line(0, "开始继续，继续，下一个好了。", final: true)
     feed.update(lines: [corrected, next], canPresent: true, now: now)
     XCTAssertEqual(feed.items.map(\.id), [corrected.id, next.id])
-    XCTAssertEqual(feed.items.map(\.text), [corrected.text, next.text])
+    XCTAssertEqual(feed.items.map(\.text), ["继续", next.text])
   }
 
   func testHiddenDraftCannotLeakThroughLaterRevisionsOfTheNextChunk() {
@@ -211,10 +259,10 @@ final class LiveBubbleFeedTests: XCTestCase {
     XCTAssertEqual(paused.map(\.text), ["先开会。再核对时间。", "已收到声音"])
     XCTAssertEqual(paused.first?.id, continuous.first?.id)
     let long = CaptionPreview.items(at: 4.8)
-    XCTAssertEqual(long.count, 2)
+    XCTAssertEqual(long.count, 3)
     XCTAssertEqual(long[1].id, paused[1].id)
-    XCTAssertTrue(long[1].text.hasSuffix("发给大家。接着发通知。"))
-    XCTAssertEqual(CaptionPreview.items(at: 7).count, 3)
+    XCTAssertTrue(long.dropFirst().map(\.text).joined().hasSuffix("发给大家。接着发通知。"))
+    XCTAssertEqual(CaptionPreview.items(at: 7).count, 4)
     XCTAssertTrue(CaptionPreview.items(at: CaptionPreview.duration).isEmpty)
   }
 

@@ -228,27 +228,30 @@ final class DesktopPresentationTests: XCTestCase {
     XCTAssertNil(state.items.last)
   }
 
-  func testLongFinalCaptionKeepsFullTextForAccessibilityAndHasBoundedHold() {
+  func testLongFinalCaptionUsesReadablePagesAndExpiresInOrder() {
     var state = DesktopCaptionState()
-    let long = "先确认今天的工作目标，" + String(repeating: "中间内容", count: 50) + "最后一句。"
-    state.update(lines: [line(long, final: true)], canPresent: true, now: now)
-    XCTAssertEqual(state.items.last?.text, long)
-    state.update(
-      lines: [line(long, final: true)], canPresent: true, now: now.addingTimeInterval(15))
-    XCTAssertNotNil(state.items.last)
-    state.update(
-      lines: [line(long, final: true)], canPresent: true, now: now.addingTimeInterval(16))
-    XCTAssertNil(state.items.last)
+    let long = "先确认今天的工作目标，" + String(repeating: "中间内容", count: 20) + "最后一句。"
+    let rows = [line(long, final: true)]
+    state.update(lines: rows, canPresent: true, now: now)
+    let pages = state.items
+    XCTAssertGreaterThan(pages.count, 1)
+    XCTAssertEqual(pages.map(\.text).joined(), long)
+    for index in pages.indices {
+      state.update(lines: rows, canPresent: true, now: now.addingTimeInterval(12 + Double(index) * 1.5))
+      XCTAssertEqual(state.items.map(\.id), pages.dropFirst(index + 1).map(\.id))
+    }
   }
 
-  func testLongPartialStillTracksRecentWordsUntilFinalized() {
+  func testLongPartialKeepsEveryPublishedPageWhenFinalPunctuationArrives() {
     var state = DesktopCaptionState()
-    let text = "开头" + String(repeating: "正在讨论", count: 40) + "最新的工作进度"
+    let text = "开头" + String(repeating: "正在讨论", count: 22) + "最新的工作进度"
     state.update(lines: [line(text)], canPresent: true, now: now)
-    XCTAssertTrue(state.items[0].text.hasSuffix("最新的工作进度"))
+    let pages = state.items
+    XCTAssertGreaterThan(pages.count, 1)
+    XCTAssertEqual(pages.map(\.text).joined(), text)
     state.update(lines: [line(text + "。", final: true)], canPresent: true, now: now)
-    XCTAssertEqual(state.items.count, 1)
-    XCTAssertTrue(state.items[0].text.hasPrefix("开头"))
+    XCTAssertEqual(state.items.dropLast(), pages.dropLast())
+    XCTAssertEqual(state.items.map(\.text).joined(), text + "。")
   }
 
   func testOldPreferencesKeepAccountAndLibraryWhenCaptionFieldsAreMissing() throws {

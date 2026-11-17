@@ -214,6 +214,36 @@ final class VoiceRecognitionTests: XCTestCase {
     XCTAssertEqual(VoiceRecognition(root: root).sampleCount, 0)
   }
 
+  @MainActor func testLegacyRollingWindowsNeedProofBeforeHistoricalFeedbackCanEnroll() throws {
+    let root = try temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let ids = ["realtime:context", "realtime:confirmed", "realtime:mixed"]
+    do {
+      let db = try VoiceLibrary(root: root)
+      for id in ids { try db.record(id: id, source: "card", live: true, seconds: 5, voice: [1, 0]) }
+    }
+    var handle: OpaquePointer?
+    XCTAssertEqual(sqlite3_open(root.appendingPathComponent("Sync/voice-campplus-v1.sqlite").path, &handle), SQLITE_OK)
+    let setup = sqlite3_exec(handle, """
+      ALTER TABLE realtime_evidence DROP COLUMN can_enroll;
+      INSERT INTO realtime_evidence(turn,generation,start_frame,end_frame,packet_start_frame,quality,
+        status,reason,track,owner_score,negative_score,packets,pcm)
+        SELECT id,'test',0,80000,0,x'00','unknown',
+          CASE WHEN id='realtime:mixed' THEN 'mixedSpeakers' ELSE 'noOwnerProfile' END,
+          1,0,0,zeroblob(10000),CASE WHEN id='realtime:context' THEN NULL ELSE zeroblob(320000) END
+        FROM turns;
+      """, nil, nil, nil)
+    sqlite3_close(handle)
+    XCTAssertEqual(setup, SQLITE_OK)
+    let migrated = try VoiceLibrary(root: root)
+    XCTAssertFalse(try migrated.canEnrollCaption(ids[0]))
+    XCTAssertTrue(try migrated.canEnrollCaption(ids[1]))
+    XCTAssertFalse(try migrated.canEnrollCaption(ids[2]))
+    try migrated.setCaptionMark("caption:context", mine: false, evidence: ids[0])
+    XCTAssertEqual(try migrated.label("caption:context"), .forUtterance(mine: false))
+    XCTAssertEqual(migrated.negativeSampleCount, 0)
+  }
+
   @MainActor func testBubbleShowsOnlyTheOppositeActionOnHoverAndKeepsCorrections() async throws {
     let root = try temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -231,7 +261,28 @@ final class VoiceRecognitionTests: XCTestCase {
     live.onVoice = record
     live.append(Data(repeating: 0, count: 6000))
     stream.onEvent?(.sentence(id: 0, text: "123", isFinal: false))
-    XCTAssertNil(app.desktop.panel)
+    let feed = try XCTUnwrap(app.desktop.panel?.feedView.rootView)
+    let firstWords = try XCTUnwrap(feed.presentation.content.items.first)
+    let row = try XCTUnwrap(firstWords.sourceLineID)
+    XCTAssertEqual(firstWords.text, "123")
+    XCTAssertNil(firstWords.voiceID)
+    XCTAssertEqual(firstWords.speakerLabel, "未知发言人")
+    feed.correct?(firstWords, .confirm)
+    let marked = try XCTUnwrap(feed.presentation.content.items.first)
+    XCTAssertTrue(marked.markedHere)
+    XCTAssertFalse(marked.hasSavedSample)
+    XCTAssertTrue(app.captionSpeaker(for: row).label.isMine)
+    XCTAssertEqual(app.voices.sampleCount, 0)
+    XCTAssertTrue(app.correctCaption(row, expectedTurn: app.captionSpeaker(for: row).id))
+    app.desktop.refresh()
+    let negative = try XCTUnwrap(feed.presentation.content.items.first)
+    XCTAssertEqual(negative.speakerLabel, "非本人")
+    XCTAssertFalse(negative.hasSavedSample)
+    let reopened = VoiceRecognition(root: root)
+    XCTAssertTrue(reopened.captionSpeaker(lineID: row, evidenceID: "draft:later").label.excluded)
+    XCTAssertEqual(reopened.negativeSampleCount, 0)
+    feed.correct?(negative, .undo)
+    XCTAssertFalse(app.captionSpeaker(for: row).markedHere)
     stream.onEvent?(.sentence(id: 0, text: "12345", isFinal: true, startMs: 0, endMs: 3000))
     let line = try XCTUnwrap(live.lines.first)
     let target = try XCTUnwrap(line.voiceID)
@@ -292,6 +343,13 @@ final class VoiceRecognitionTests: XCTestCase {
     let feed = panel.feedView.rootView.presentation
     desktop.refresh(pointer: .zero)
     XCTAssertNil(desktop.closeButton)
+    // Hover once the new row has opened enough to show its native identity control.
+    let item = try XCTUnwrap(feed.content.items.last)
+    for _ in 0..<30 {
+      if let row = panel.anchor(for: draft.id), let action = panel.anchor(for: item.actionAnchor),
+         row.contains(action) { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
     let bubble = try XCTUnwrap(panel.anchor(for: draft.id))
     desktop.refresh(pointer: NSPoint(x: bubble.midX, y: bubble.midY))
     let close = try XCTUnwrap(desktop.closeButton)
@@ -562,13 +620,21 @@ final class VoiceRecognitionTests: XCTestCase {
     try db.setCaptionMark("caption:other", mine: true, evidence: "misgrouped", packets: packets)
     XCTAssertTrue(try XCTUnwrap(db.label("similar")).isMine)
     XCTAssertEqual(try db.label("a")?.savedName, "同事")
+    try db.record(id: "short", source: "card", live: true, seconds: 1, voice: [1, 0])
+    let voices = VoiceRecognition(root: root)
+    let count = voices.sampleCount, negativeCount = voices.negativeSampleCount
+    voices.setCaptionMark(lineID: "short", mine: true, evidence: "short")
+    XCTAssertTrue(voices.captionSpeaker(lineID: "short", evidenceID: nil).label.isMine)
+    XCTAssertEqual(voices.sampleCount, count)
+    voices.setCaptionMark(lineID: "short", mine: false, evidence: "short")
+    XCTAssertEqual(voices.negativeSampleCount, negativeCount)
     for (id, vector): (String, [Float]) in [("nan", [.nan]), ("zero", [0, 0])] {
       try db.record(id: id, source: "card", live: true, seconds: 3, voice: vector)
       XCTAssertFalse(try db.hasLiveVoice(id))
     }
   }
 
-  @MainActor func testDraftConfirmationLearnsExactLocalAudioWhenCloudIsAlsoActive() async throws {
+  @MainActor func testDraftConfirmationRemainsLabelOnlyWhenLocalVoiceArrivesLater() async throws {
     guard let path = ProcessInfo.processInfo.environment["WORKDAY_PUBLIC_SPEECH"] else {
       throw XCTSkip("Requires the public speaker example fixtures")
     }
@@ -579,8 +645,7 @@ final class VoiceRecognitionTests: XCTestCase {
     let app = AppModel(libraryURL: root, localCaptions: local)
     app.preferences.captions.enabled = true
     // Exercise the local audio capture policy used with an active cloud transcript.
-    local.onVoice = nil
-    local.retainConfirmationAudio = true
+    local.onVoice = { _, _, _, _ in } // Hold the sentence-level encoder result until after feedback.
     let fixtures = URL(fileURLWithPath: path)
     func draft(_ file: String, number: Int) throws -> (line: String, start: Double) {
       let start = local.receivedSeconds * 1000
@@ -594,19 +659,20 @@ final class VoiceRecognitionTests: XCTestCase {
     XCTAssertEqual(app.voices.sampleCount, 0)
     stream.onEvent?(.sentence(id: 0, text: "第一句。", isFinal: true,
                               startMs: first.start, endMs: local.receivedSeconds * 1000))
-    for _ in 0..<120 {
-      if app.voices.sampleCount == 1 { break }
-      try await Task.sleep(for: .milliseconds(25))
-    }
-    XCTAssertEqual(app.voices.sampleCount, 1)
-    XCTAssertEqual(app.captionSpeaker(for: first.line).label.sampleID, "live:" + first.line)
+    let evidence = try XCTUnwrap(local.lines.first?.voiceID)
+    try app.voices.recordLive(id: evidence, source: "card", seconds: local.receivedSeconds,
+                              vector: [1, 0], countDuration: false)
+    let reopened = VoiceRecognition(root: root)
+    let marked = reopened.captionSpeaker(lineID: first.line, evidenceID: evidence)
+    XCTAssertTrue(marked.label.isMine)
+    XCTAssertNil(marked.label.sampleID)
+    XCTAssertEqual(reopened.sampleCount, 0)
     let revoked = try draft("leijun-test-sr-2", number: 1)
     app.voices.undoConfirmation(for: "caption:" + revoked.line)
     stream.onEvent?(.sentence(id: 1, text: "另一位。", isFinal: true,
                               startMs: revoked.start, endMs: local.receivedSeconds * 1000))
-    app.voices.resolvePendingCaptions(in: local)
     await app.voices.waitForStoppedTasks()
-    XCTAssertEqual(app.voices.sampleCount, 1)
+    XCTAssertEqual(app.voices.sampleCount, 0)
     XCTAssertFalse(app.captionSpeaker(for: revoked.line).label.isMine)
     await app.shutdown()
   }
@@ -631,8 +697,7 @@ final class VoiceRecognitionTests: XCTestCase {
     let cloud = LivePreview(makeLocalStream: { cloudStream })
     let app = AppModel(libraryURL: root, live: cloud, localCaptions: local)
     app.preferences.captions.enabled = true
-    local.onVoice = nil
-    local.retainConfirmationAudio = true
+    local.onVoice = { _, _, _, _ in } // Hold the sentence-level encoder result until after feedback.
     cloud.configure(enabled: true, service: nil)
     // Simulate a wider cloud turn that has been attributed to the wrong person.
     cloud.onVoice = { id, source, _, seconds in
@@ -653,13 +718,14 @@ final class VoiceRecognitionTests: XCTestCase {
     let line = try XCTUnwrap(local.lines.last)
     XCTAssertTrue(app.captionSpeaker(for: line.id).label.isMine)
     XCTAssertTrue(app.correctCaption(line.id, expectedTurn: covering))
-    for _ in 0..<120 {
-      if app.voices.negativeSampleCount == 1 { break }
-      try await Task.sleep(for: .milliseconds(25))
-    }
-    XCTAssertTrue(try XCTUnwrap(app.voices.label(line.voiceID)).isNegativeSample)
+    let packets = try XCTUnwrap(line.bubblePackets)
+    let id = try XCTUnwrap(line.voiceID)
+    app.voices.observeLive(id: id, source: "card", packets: packets, seconds: Double(packets.count) / 2000)
+    await app.voices.waitForStoppedTasks()
+    XCTAssertTrue(app.voices.hasLiveVoice(id))
+    XCTAssertTrue(app.captionSpeaker(for: line.id).label.excluded)
     XCTAssertTrue(try XCTUnwrap(app.voices.label(covering)).isMine)
-    XCTAssertEqual(app.voices.negativeSampleCount, 1)
+    XCTAssertEqual(app.voices.negativeSampleCount, 0)
     XCTAssertEqual(app.voices.sampleCount, 1)
     await app.shutdown()
   }

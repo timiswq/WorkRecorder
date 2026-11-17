@@ -44,7 +44,6 @@ struct LiveLine: Identifiable, Equatable {
   var replay: CaptionReplay? = nil
   var fileReviewEligible = false
   var hasUnpublishedWords = false
-  var isSoundFeedback = false
   var bubblePhrase: AppleBubblePhrase?
 
   var captionText: String { text.split(whereSeparator: \.isWhitespace).joined(separator: " ") }
@@ -111,17 +110,6 @@ struct PendingCaption: Equatable {
   var onVoice: ((String, String, Data, Double) -> Void)?
   var draftVoiceIsUsable: ((String) -> Bool)?
   var onDraftVoice: ((String, String, Data, Double) -> Void)?
-  struct ConfirmationAudio {
-    let source: String
-    let packets: Data
-    let seconds: Double
-  }
-  // With cloud ASR, keep the local phrase's own audio for explicit corrections.
-  // The cache follows the bounded transcript and does not run a second encoder by default.
-  var retainConfirmationAudio = false {
-    didSet { if !retainConfirmationAudio { confirmationAudio.removeAll() } }
-  }
-  private(set) var confirmationAudio: [String: ConfirmationAudio] = [:]
   private var sessions: [UUID: Session] = [:]
   private struct ClosingRecording {
     let stream: LiveASRStreaming
@@ -300,7 +288,7 @@ struct PendingCaption: Equatable {
   }
   private func appendToActive(_ data: Data) {
     guard let id = active, let stream = sessions[id]?.stream else { return }
-    if onVoice != nil || onDraftVoice != nil || retainConfirmationAudio || cacheCaptionAudio {
+    if onVoice != nil || onDraftVoice != nil || cacheCaptionAudio {
       if sessions[id]?.sourceName == nil { sessions[id]?.sourceName = voiceSource?() }
       sessions[id]?.packets.append(data)
       // Prune whole packets in batches, keeping at least two minutes of trailing audio.
@@ -380,7 +368,6 @@ struct PendingCaption: Equatable {
     stopStreams()
     clearUnsentAudio()
     textThroughOffset = -1
-    confirmationAudio.removeAll()
     lines = []
     receivedBytes = 0
     lastAudioAt = nil
@@ -575,13 +562,13 @@ struct PendingCaption: Equatable {
          start.isFinite, end.isFinite, start >= 0, end > start, end <= Double(session.bytes) / 2 + 1 {
         let lower = Int(ceil(start / 20)) * 40
         let upper = Int(floor(end / 20)) * 40
-        if (4_000...240_000).contains(upper - lower), lower >= session.firstByte,
+        if SpeakerEncoder.acceptsLivePacketCount(upper - lower), lower >= session.firstByte,
            upper - session.firstByte <= session.packets.count {
           let range = lower..<upper
           let base = session.packets.startIndex - session.firstByte
           let old = previous?.draftVoice
           let text = line.bubblePhrase?.text ?? line.text
-          if isFinal, onVoice != nil || retainConfirmationAudio {
+          if isFinal, onVoice != nil {
             line.voiceRange = range
             if let old, old.range == range, draftVoiceIsUsable?(old.id) == true {
               line.voiceID = old.id
@@ -630,7 +617,6 @@ struct PendingCaption: Equatable {
         updated.insert(line, at: insertion)
         if updated.count > LiveLine.maximumRetained {
           let retired = updated.removeFirst()
-          confirmationAudio.removeValue(forKey: retired.id)
           if let owner = sessions.first(where: { $0.value.index == retired.segment })?.key {
             let floor = max(sessions[owner]?.retiredSentence ?? -1, retired.sentence)
             sessions[owner]?.retiredSentence = floor
@@ -653,12 +639,7 @@ struct PendingCaption: Equatable {
       }
       if changed, let voiceID = line.voiceID, let (packets, seconds) = evidence {
         let source = VoiceRecognition.source(session.sourceName, fallback: id.uuidString)
-        if retainConfirmationAudio {
-          confirmationAudio[lineID] = ConfirmationAudio(source: source, packets: packets, seconds: seconds)
-        }
         onVoice?(voiceID, source, packets, seconds)
-      } else if changed, line.voiceID == nil {
-        confirmationAudio.removeValue(forKey: lineID)
       }
       if changed { onLineChanged?(line) }
     case .finished:

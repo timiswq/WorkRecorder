@@ -2,7 +2,7 @@ import Combine
 import Foundation
 import WorkdayCore
 
-/// Only the small sidebar indicator observes these frequent updates.
+/// The sidebar and active caption meter observe samples without refreshing the workspace.
 @MainActor final class LiveAudioMeter: ObservableObject {
   struct Sample: Equatable {
     let segments: Int

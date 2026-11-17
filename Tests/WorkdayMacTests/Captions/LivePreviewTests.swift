@@ -7,7 +7,7 @@ import XCTest
 @testable import WorkdayMac
 
 final class LivePreviewTests: XCTestCase {
-  @MainActor func testVoiceBubbleFollowsTranscriptWhenAppleAddsTheBeginningOfASentence() throws {
+  @MainActor func testVisiblePhraseStaysFixedWhenAppleRepairsTheBeginningOfItsHistoryRow() throws {
     _ = NSApplication.shared
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -30,13 +30,17 @@ final class LivePreviewTests: XCTestCase {
     let panel = try XCTUnwrap(model.desktop.panel)
     let id = try XCTUnwrap(live.lines.first?.id)
     let voice = try XCTUnwrap(live.lines.first?.bubbleVoiceID)
+    let published = try XCTUnwrap(panel.feedView.rootView.presentation.content.items.first)
+    XCTAssertFalse(published.text.isEmpty)
     func check(_ expected: String, line: UInt = #line) throws {
       let bubble = try XCTUnwrap(panel.feedView.rootView.presentation.content.items.first, line: line)
       let record = try XCTUnwrap(model.captionHistory.records.first { $0.id == id }, line: line)
       XCTAssertEqual(record.text, expected, line: line)
       XCTAssertEqual(bubble.sourceLineID, record.id, line: line)
-      XCTAssertEqual(bubble.text, record.text, line: line)
-      XCTAssertEqual(CaptionTypography.visibleText(bubble, username: ""), record.text, line: line)
+      XCTAssertTrue(bubble.text.hasPrefix(published.text), line: line)
+      XCTAssertFalse(bubble.text.contains("我就确定一下"), line: line)
+      XCTAssertTrue(bubble.text.hasSuffix("。"), line: line)
+      XCTAssertEqual(bubble.phrases.prefix(published.phrases.count), published.phrases[...], line: line)
       XCTAssertEqual(bubble.speakerLabel, model.captionSpeaker(for: record).label.captionTitle(using: model.preferences.captions), line: line)
       XCTAssertEqual(bubble.voiceID, voice, line: line)
       XCTAssertEqual(live.lines.first?.bubblePackets, packets, line: line)
@@ -48,7 +52,7 @@ final class LivePreviewTests: XCTestCase {
     try check(complete)
   }
 
-  @MainActor func testApplePhrasesWithoutUsableVoiceStayOnlyInHistory() throws {
+  @MainActor func testApplePhrasesWithoutUsableVoiceAlsoAppearOnDesktop() throws {
     _ = NSApplication.shared
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -67,16 +71,17 @@ final class LivePreviewTests: XCTestCase {
     partial("会意", until: 160)
     partial("会议室", until: 220)
     partial("会议室里", until: 300)
-    XCTAssertNil(model.desktop.panel)
+    XCTAssertEqual(model.desktop.panel?.feedView.rootView.presentation.content.items.first?.text, "会议室")
     let clause = "会议室里" + String(repeating: "请先确认日期", count: 6) + "，"
     let next = "再发通知。"
     stream.sendApple([ASRWord(text: clause, startMs: 0, endMs: 3000),
                       ASRWord(text: next, startMs: 3000, endMs: 3400)], final: true, range: 0..<3400)
     XCTAssertEqual(live.lines.map(\.text), [clause, next])
     let host = try XCTUnwrap(model.desktop.panel?.feedView)
-    XCTAssertEqual(host.rootView.presentation.content.items.map(\.text), [clause])
+    XCTAssertEqual(host.rootView.presentation.content.items.map(\.text).joined(), clause + next)
     stream.sendApple([ASRWord(text: "好", startMs: 4500, endMs: 4760)], final: true, range: 4500..<4760)
-    XCTAssertEqual(host.rootView.presentation.content.items.map(\.text), [clause])
+    XCTAssertEqual(host.rootView.presentation.content.items.map(\.text).joined(), clause + next + "好")
+    XCTAssertNil(host.rootView.presentation.content.items.last?.voiceID)
     XCTAssertEqual(model.captionHistory.records.map(\.text), [clause, next, "好"])
   }
 
@@ -152,7 +157,10 @@ final class LivePreviewTests: XCTestCase {
       let ids = Set(live.lines.map(\.id))
       XCTAssertEqual(Set(model.captionHistory.records.filter { ids.contains($0.id) }.map(\.text)), Set(text), line: line)
       XCTAssertFalse(model.captionHistory.records.contains { $0.text == "百炼主窗口" }, line: line)
-      XCTAssertNil(model.desktop.panel, line: line)
+      let stable = live.lines.filter(\.isFinal).map(\.text)
+      let displayed = model.desktop.panel?.feedView.rootView.presentation.content.items ?? []
+      XCTAssertEqual(displayed.map(\.text), stable, line: line)
+      XCTAssertTrue(displayed.allSatisfy { $0.voiceID == nil }, line: line)
     }
     stream.onEvent?(.sentence(id: 2, text: "下午", isFinal: false, startMs: 100))
     check(["周四", "下午"])
@@ -193,13 +201,18 @@ final class LivePreviewTests: XCTestCase {
     XCTAssertNil(model.desktop.panel)
 
     stream.onEvent?(.sentence(id: 1, text: "嗯，周四，", isFinal: false, startMs: 3000, endMs: 6000))
+    XCTAssertNil(model.desktop.panel)
+    stream.onEvent?(.sentence(id: 1, text: "嗯，周四，哦不", isFinal: false, startMs: 3000, endMs: 6000))
     let host = try XCTUnwrap(model.desktop.panel?.feedView)
-    XCTAssertEqual(host.rootView.presentation.content.items.map(\.text), ["嗯，周四，"])
+    let prefix = try XCTUnwrap(host.rootView.presentation.content.items.first?.text)
+    XCTAssertTrue(prefix.contains("周四"))
     stream.onEvent?(.sentence(id: 1, text: "嗯，周四，哦不，周五。下一项", isFinal: false, startMs: 3000, endMs: 6000))
     let firstID = try XCTUnwrap(host.rootView.presentation.content.items.first?.id)
     stream.onEvent?(.sentence(id: 1, text: "周五。下一项也确认了。", isFinal: true, startMs: 3000, endMs: 6000))
     XCTAssertEqual(host.rootView.presentation.content.items.map(\.id), [firstID])
-    XCTAssertEqual(host.rootView.presentation.content.items.map(\.text), ["周五。下一项也确认了。"])
+    let shown = try XCTUnwrap(host.rootView.presentation.content.items.first?.text)
+    XCTAssertTrue(shown.hasPrefix(prefix))
+    XCTAssertTrue(shown.hasSuffix("也确认了。"))
     XCTAssertEqual(live.lines.last?.text, "周五。下一项也确认了。")
     XCTAssertEqual(streamsStarted, 1)
 
@@ -212,15 +225,15 @@ final class LivePreviewTests: XCTestCase {
       try await Task.sleep(for: .milliseconds(20))
     }
     XCTAssertEqual(model.desktop.panel?.isVisible, false)
-    stream.onEvent?(.sentence(id: 3, text: "重新开讲。", isFinal: false, startMs: 9000, endMs: 12000))
+    stream.onEvent?(.sentence(id: 3, text: "重新开讲。", isFinal: true, startMs: 9000, endMs: 12000))
     XCTAssertEqual(host.rootView.presentation.content.items.map(\.text), ["重新开讲。"])
     live.boundary(.started)
     live.append(Data(repeating: 0, count: 24000))
-    stream.onEvent?(.sentence(id: 0, text: "新录音", isFinal: false, startMs: 0, endMs: 3000))
+    stream.onEvent?(.sentence(id: 0, text: "新录音", isFinal: true, startMs: 0, endMs: 3000))
     XCTAssertEqual(host.rootView.presentation.content.items.map(\.text), ["新录音"])
   }
 
-  @MainActor func testPartialAppearsOnceItsTimedAudioYieldsAUsableVoice() throws {
+  @MainActor func testStablePartialKeepsItsBubbleIDWhenTheFinalVoiceArrives() throws {
     _ = NSApplication.shared
     let root = ProcessInfo.processInfo.environment["WORKDAY_TEST_ROOT"] ?? NSTemporaryDirectory()
     let stream = TestLiveStream()
@@ -240,12 +253,14 @@ final class LivePreviewTests: XCTestCase {
     stream.onEvent?(.sentence(id: 4, text: "为", isFinal: false, startMs: 0, endMs: 200))
     XCTAssertNil(model.desktop.panel)
     stream.onEvent?(.sentence(id: 4, text: "为什么", isFinal: false, startMs: 0, endMs: 3000))
+    XCTAssertNil(model.desktop.panel)
+    stream.onEvent?(.sentence(id: 4, text: "为什么会这样", isFinal: false, startMs: 0, endMs: 4200))
     let host = try XCTUnwrap(model.desktop.panel?.feedView)
     let first = try XCTUnwrap(host.rootView.presentation.content.items.first)
     XCTAssertEqual(first.text, "为什么")
     XCTAssertFalse(first.isFinal)
     stream.onEvent?(.sentence(id: 4, text: "为什么会这样", isFinal: false, startMs: 0, endMs: 4200))
-    XCTAssertEqual(host.rootView.presentation.content.items.first?.text, "为什么会这样")
+    XCTAssertEqual(host.rootView.presentation.content.items.first?.text, first.text, "相同草稿回调不能重复追加")
     XCTAssertEqual(host.rootView.presentation.content.items.first?.voiceID, first.voiceID)
     stream.onEvent?(.sentence(id: 4, text: "为什么会这样。", isFinal: true, startMs: 0, endMs: 4200))
     let final = try XCTUnwrap(host.rootView.presentation.content.items.first)

@@ -10,7 +10,7 @@ struct DesktopCaptionSettings: View {
         HStack {
           VStack(alignment: .leading, spacing: 5) {
             Text("启用本机字幕与桌面气泡")
-            Text("实时字幕保留全部发言。提取到这段声音的声纹后，桌面才显示气泡。")
+            Text("开口时先显示声波，短语稳定后淡入文字。未识别出发言人时显示「未知发言人」。")
               .font(.system(size: 10)).foregroundStyle(Palette.muted)
           }
           Spacer()

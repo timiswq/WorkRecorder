@@ -68,7 +68,7 @@ final class VoiceSampleResetTests: XCTestCase {
     XCTAssertEqual(try reopened.label("owner")?.sampleID, "owner")
   }
 
-  @MainActor func testClearSamplesCancelsPendingEnrollmentBeforeLateFinalEvidence() throws {
+  @MainActor func testLabelWithoutVoiceNeedsNoSampleResetWhenFinalEvidenceArrives() throws {
     let root = root()
     defer { try? FileManager.default.removeItem(at: root) }
     let db = try VoiceLibrary(root: root)
@@ -76,19 +76,18 @@ final class VoiceSampleResetTests: XCTestCase {
     let stream = ResetTestStream()
     let live = LivePreview(makeStream: { _ in stream })
     defer { voices.stop(); live.reset() }
-    live.retainConfirmationAudio = true
+    live.onVoice = { _, _, _, _ in }
     live.configure(enabled: true, service: AIService(key: "local-test"))
     live.append(Data(repeating: 72, count: 6000))
     stream.onEvent?(.sentence(id: 0, text: "尚未定稿", isFinal: false))
     let lineID = try XCTUnwrap(live.lines.last?.id)
     voices.confirm("caption:" + lineID, captionLineID: lineID)
-    XCTAssertTrue(voices.canClearSamples)
+    XCTAssertFalse(voices.canClearSamples)
     voices.clearSamples()
     XCTAssertFalse(voices.canClearSamples)
     try db.record(id: "live:" + lineID, source: "card", live: true, seconds: 3, voice: [1, 0])
     stream.onEvent?(.sentence(id: 0, text: "现在定稿", isFinal: true, startMs: 0, endMs: 3000))
     XCTAssertNotNil(live.lines.last?.voiceID)
-    voices.resolvePendingCaptions(in: live)
     XCTAssertEqual(voices.sampleCount, 0)
     XCTAssertEqual(try VoiceLibrary(root: root).sampleCount, 0)
     XCTAssertTrue(try XCTUnwrap(voices.label("caption:" + lineID)).isMine)

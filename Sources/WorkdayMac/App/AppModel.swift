@@ -119,7 +119,6 @@ enum Destination: String, CaseIterable {
   let live: LivePreview
   private(set) var voices: VoiceRecognition
   private var voiceSubscription: AnyCancellable?
-  private var pendingCaptionSubscription: AnyCancellable?
   let desktop = DesktopCompanion()
   let isolated: Bool
   let demo: Bool
@@ -509,12 +508,6 @@ enum Destination: String, CaseIterable {
     voiceSubscription = voices.objectWillChange.sink { [weak self] _ in
       self?.objectWillChange.send()
     }
-    pendingCaptionSubscription = Publishers.Merge(
-      localCaptions.$lines.map { _ in () }, voices.objectWillChange
-    ).receive(on: RunLoop.main).sink { [weak self] in
-      guard let self else { return }
-      voices.resolvePendingCaptions(in: localCaptions)
-    }
     live.voiceSource = { [weak self] in self?.card.state.filename }
     localCaptions.voiceSource = live.voiceSource
     live.onVoice = { [weak self] id, source, packets, seconds in
@@ -542,20 +535,29 @@ enum Destination: String, CaseIterable {
     voices.captionSpeaker(lineID: line.id, evidenceID: captionVoiceID(for: line))
   }
   @discardableResult func confirmCaption(_ lineID: String) -> Bool {
-    let local = localCaptions.lines.first { $0.id == lineID }
-    let saved = local == nil ? captionHistory.records.last { $0.id == lineID } : nil
-    guard local != nil || saved != nil else { return false }
-    // Cloud turns can span several bubbles. Learn only from this bubble's local audio.
-    voices.setCaptionMark(lineID: lineID, mine: true, evidence: local.flatMap(localFeedbackID) ?? saved?.localVoiceID)
-    return true
+    markCaption(lineID, mine: true)
   }
+
   @discardableResult func correctCaption(_ lineID: String, expectedTurn: String) -> Bool {
-    let local = localCaptions.lines.first { $0.id == lineID }
-    let saved = local == nil ? captionHistory.records.last { $0.id == lineID } : nil
+    markCaption(lineID, mine: false, expectedTurn: expectedTurn)
+  }
+
+  private func markCaption(_ id: String, mine: Bool, expectedTurn: String? = nil) -> Bool {
+    let local = localCaptions.lines.first { $0.id == id }
+    let saved = local == nil ? captionHistory.records.last { $0.id == id } : nil
     guard local != nil || saved != nil else { return false }
-    let speaker = saved.map { captionSpeaker(for: $0) } ?? captionSpeaker(for: lineID)
-    guard speaker.id == expectedTurn, speaker.controls == .reject else { return false }
-    voices.setCaptionMark(lineID: lineID, mine: false, evidence: local.flatMap(localFeedbackID) ?? saved?.localVoiceID)
+    if let expectedTurn {
+      let speaker = saved.map { captionSpeaker(for: $0) } ?? captionSpeaker(for: id)
+      guard speaker.id == expectedTurn, !speaker.label.excluded else { return false }
+    }
+
+    // A historical row may carry a covering cloud speaker. Only its local sentence or rolling window can enroll.
+    let shown = local.map(voices.presentationLine)
+    var evidence = shown?.bubbleVoiceID ?? saved?.localVoiceID
+    if let rolling = saved?.evidenceID, rolling.hasPrefix("realtime:"), !voices.hasLiveVoice(evidence) {
+      evidence = rolling
+    }
+    voices.setCaptionMark(lineID: id, mine: mine, evidence: evidence, packets: shown?.bubblePackets)
     return true
   }
 
@@ -565,16 +567,8 @@ enum Destination: String, CaseIterable {
     guard let local = localCaptions.lines.first(where: { $0.id == lineID }) else { return nil }
     return captionVoiceID(for: local)
   }
-  private func localFeedbackID(_ line: LiveLine) -> String? {
-    let shown = voices.presentationLine(line)
-    if let id = shown.bubbleVoiceID, id.hasPrefix("realtime:"), voices.hasLiveVoice(id) { return id }
-    if let id = line.voiceID { return id }
-    guard let id = line.draftVoice?.id, voices.hasLiveVoice(id) else { return nil }
-    return id
-  }
   private func captionVoiceID(for local: LiveLine) -> String? {
-    if let id = localFeedbackID(local),
-      localCaptions.confirmationAudio[local.id] == nil || voices.label(id) != nil { return id }
+    if let id = voices.usableVoiceID(for: voices.presentationLine(local)) { return id }
     guard preferences.liveModel != .segment, let range = local.recordingRange else { return nil }
     let overlapping = live.lines.filter { $0.recordingRange?.overlaps(range) == true }
     guard overlapping.count == 1, let cloud = overlapping.first, let span = cloud.recordingRange,

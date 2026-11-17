@@ -46,7 +46,7 @@ final class CaptionFileReviewTests: XCTestCase {
     XCTAssertEqual(audioBefore, audioAfter)
   }
 
-  @MainActor func testCloudFinalUpdatesVisibleBubbleWithoutReopeningExpiredOrDismissedBubbles() async throws {
+  @MainActor func testCloudReviewUpdatesOnlyHistoryAndPreservesVisibleDismissedAndExpiredBubbles() async throws {
     _ = NSApplication.shared
     let root = try testRoot()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -69,7 +69,7 @@ final class CaptionFileReviewTests: XCTestCase {
       stream.onEvent?(.sentence(id: i, text: "初稿 \(i + 1)", isFinal: true,
                                 startMs: Double(i * 3000), endMs: Double((i + 1) * 3000)))
     }
-    try await until { model.desktop.panel?.feedView.rootView.presentation.content.items.count == 3 }
+    try await until { model.desktop.panel?.feedView.rootView.presentation.content.items.filter { $0.voiceID != nil }.count == 3 }
     let feed = try XCTUnwrap(model.desktop.panel?.feedView.rootView)
     let original = feed.presentation.content.items
     let records = model.captionHistory.records
@@ -80,17 +80,18 @@ final class CaptionFileReviewTests: XCTestCase {
     XCTAssertEqual(feed.presentation.content.items.map(\.id), [original[2].id])
 
     await stub.releaseFirst()
-    try await until { feed.presentation.content.items.first?.text == "云端 3" }
+    try await until { model.captionHistory.records.last?.transcript.text == "云端 3" }
+    model.desktop.refresh()
     let revised = try XCTUnwrap(feed.presentation.content.items.first)
     XCTAssertEqual(feed.presentation.content.items.map(\.id), [original[2].id])
-    XCTAssertEqual(revised.voiceID, original[2].voiceID)
+    XCTAssertEqual(revised, original[2])
     XCTAssertEqual(revised.receivedAt, original[2].receivedAt)
     let updated = model.captionHistory.records
     XCTAssertEqual(updated.map(\.id), records.map(\.id))
     XCTAssertEqual(updated.map(\.time), records.map(\.time))
     XCTAssertEqual(updated.map { $0.transcript.text }, ["云端 1", "云端 2", "云端 3"])
     XCTAssertEqual(updated.map { $0.transcript.source?.title }, Array(repeating: "云端转写", count: 3))
-    XCTAssertEqual(model.menuRecentSpeech?.line.transcript.text, revised.text)
+    XCTAssertEqual(model.menuRecentSpeech?.line.transcript.text, "云端 3")
     feed.correct?(revised, .confirm)
     let evidence = try XCTUnwrap(revised.voiceID)
     XCTAssertEqual(try VoiceLibrary(root: root).sampleAudio(evidence), local.lines.last?.bubblePackets)

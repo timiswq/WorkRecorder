@@ -48,38 +48,36 @@ final class DesktopAppearanceTests: XCTestCase {
     XCTAssertNotEqual(recording.tiffRepresentation, warning.tiffRepresentation)
   }
 
-  func testFinalStillShowsLatestWordsWithAndWithoutSpeakerButtons() {
-    let text = "今天先完成" + String(repeating: "一项很长的工作安排，", count: 6) + "然后准备发布。"
-    let partial = DesktopCaption(id: "one", text: text, isFinal: false)
-    let visible = CaptionTypography.visibleText(partial, username: "很长的中文用户名")
-    XCTAssertTrue(visible.hasPrefix("…"))
-    XCTAssertTrue(visible.hasSuffix("然后准备发布。"))
-    XCTAssertLessThan(visible.count, text.count)
-    XCTAssertEqual(
-      CaptionTypography.visibleText(.init(id: "one", text: text, isFinal: true), username: "很长的中文用户名"),
-      visible)
-    var labeled = partial
-    labeled.voiceID = "speaker"
-    labeled.identityControls = .confirm
-    let narrowed = CaptionTypography.visibleText(labeled, username: "很长的中文用户名")
-    XCTAssertTrue(narrowed.hasSuffix("然后准备发布。"))
-    XCTAssertEqual(narrowed, visible, "发言人按钮在独立一行，不占用字幕正文宽度")
-  }
-
-  func testLongCaptionStartsAtANearbyPhraseOrWordBoundary() {
-    func visible(_ text: String) -> String {
-      CaptionTypography.visibleText(.init(id: "line", text: text, isFinal: true), username: "青木")
+  func testShortPhrasesFadeIndependentlyAndPageBreaksKeepTheirReadPositions() throws {
+    let start = Date(timeIntervalSince1970: 100)
+    var state = DesktopCaptionState()
+    func update(_ text: String, seconds: Double, final: Bool = false) {
+      state.update(rows: [DesktopCaption(id: "one", text: text, isFinal: final, sourceLineID: "one")],
+                   canPresent: true, now: start.addingTimeInterval(seconds))
     }
-    let chinese = String(repeating: "先确认计划，", count: 9) + "最后检查这版的录音效果。"
-    XCTAssertTrue(visible(chinese).hasPrefix("…先确认计划，"))
-    XCTAssertTrue(visible(chinese).hasSuffix("最后检查这版的录音效果。"))
-    let english = String(repeating: "prepare ", count: 17) + "final draft"
-    XCTAssertTrue(visible(english).hasPrefix("…prepare "))
-    XCTAssertTrue(visible(english).hasSuffix("final draft"))
-    let uninterrupted = String(repeating: "甲", count: 90) + "乙"
-    XCTAssertTrue(visible(uninterrupted).hasPrefix("…甲"))
-    XCTAssertTrue(visible(uninterrupted).hasSuffix("乙"))
-    XCTAssertEqual(visible("直接读这句。"), "直接读这句。")
+    let first = "我们周五下午"
+    let second = first + "三点开会。"
+    update(first, seconds: 0)
+    let initial = try XCTUnwrap(state.items.first?.phrases.first)
+    update(second, seconds: 1)
+    XCTAssertEqual(state.items.first?.phrases.first, initial)
+    XCTAssertEqual(state.items.first?.phrases.last, CaptionPhrase(text: "三点开会。", line: 0,
+                                                                  appearedAt: start.addingTimeInterval(1)))
+    let long = second + String(repeating: "交付 👩🏽‍💻 report ", count: 10)
+    update(long, seconds: 2)
+    let pages = state.items
+    XCTAssertGreaterThan(pages.count, 1)
+    XCTAssertEqual(pages.map(\.text).joined(), long)
+    XCTAssertEqual(pages.first?.phrases.first, initial)
+    for page in pages {
+      XCTAssertEqual(page.sourceLineID, "one")
+      XCTAssertEqual(page.phrases.map(\.text).joined(), page.text)
+      XCTAssertTrue(page.phrases.allSatisfy { (0...1).contains($0.line) })
+    }
+    update(long + "结束。", seconds: 3, final: true)
+    XCTAssertEqual(state.items.first, pages.first)
+    XCTAssertEqual(Set(state.items.map(\.id)).count, state.items.count)
+    XCTAssertEqual(state.items.map(\.text).joined(), long + "结束。")
   }
 
   func testDisplayNamesKeepDistinctSuffixesAndBoundPastedGraphemes() {

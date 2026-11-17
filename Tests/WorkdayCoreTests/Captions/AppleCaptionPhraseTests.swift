@@ -32,6 +32,7 @@ final class AppleCaptionPhraseTests: XCTestCase {
     XCTAssertEqual(phrases.bubblePhrases[0]?.text, "明天继续")
     XCTAssertEqual(phrases.bubblePhrases[1]?.text, "开会")
     XCTAssertEqual(phrases.bubblePhrases[1]?.continuesPrevious, true)
+    XCTAssertEqual(phrases.bubblePhrases[1]?.carriedText, "继续")
   }
 
   func testPunctuationInsertedBeforeTheReadPositionDoesNotRepeatTheNextWord() {

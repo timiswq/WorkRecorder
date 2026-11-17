@@ -118,7 +118,7 @@ struct SettingsView: View {
           Text("本人的声纹")
           Text(model.voices.confirmed
                ? "已保存 \(model.voices.sampleCount) 条本人声纹样本。在发言人的菜单中点「是我」可继续补充。"
-               : "在发言人菜单或桌面气泡上点「是我」，用这句话的声纹识别后续发言。")
+               : "点「是我」可标注这句发言。只有本句音频足够长且声纹可用时，才会保存为样本。")
             .font(.system(size: 11)).foregroundStyle(Palette.muted)
           if model.voices.inconsistentSampleCount > 0 {
             Text("有 \(model.voices.inconsistentSampleCount) 条样本与其他本人样本差异较大，建议在正常佩戴录音卡时补充清晰发言。原样本已保留。")
@@ -187,7 +187,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 5) {
           Text("云端实时识别")
           Text(model.preferences.liveModel == .segment
-               ? "先显示本机初稿。云端转写完成后，同一行字幕和仍在显示的气泡会更新为云端文字。"
+               ? "桌面气泡按短语显示本机文字。云端复核结果保存在字幕历史的原行。"
                : "与本机同时识别。字幕就绪后最多等云端 150 毫秒，已显示的气泡文字只追加。")
             .font(.system(size: 11)).foregroundStyle(Palette.muted)
         }

@@ -11,7 +11,7 @@ final class PersonalSpeechTests: XCTestCase {
     return url
   }
 
-  @MainActor func testBothVoicesAppearWhileShortCaptionsRemainInHistoryAndMenu() async throws {
+  @MainActor func testBothVoicesAndShortCaptionsAppearOnDesktopInHistoryAndMenu() async throws {
     _ = NSApplication.shared
     let root = try temporaryRoot()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -44,18 +44,39 @@ final class PersonalSpeechTests: XCTestCase {
     func bubbleTexts() -> [String]? {
       model.desktop.panel?.feedView.rootView.presentation.content.items.map(\.text)
     }
-    XCTAssertEqual(bubbleTexts(), ["同事发言", "我的发言"])
+    XCTAssertEqual(bubbleTexts(), ["同事发言", "我的发言", "嗯"])
     model.desktop.refresh(transcript: [draft, short])
-    XCTAssertEqual(bubbleTexts(), [])
+    XCTAssertEqual(bubbleTexts(), ["我的发言", "嗯"])
+    XCTAssertEqual(model.desktop.panel?.feedView.rootView.presentation.content.items.last?.identityControls, .confirm)
     model.voices.confirm("sample")
     model.desktop.refresh(transcript: rows)
-    XCTAssertEqual(bubbleTexts(), ["同事发言", "我的发言"])
+    XCTAssertEqual(bubbleTexts(), ["同事发言", "我的发言", "嗯"])
     XCTAssertEqual(model.captionHistory.records.map(\.id), ["guest", "owner", "short"])
     XCTAssertEqual(model.menuRecentSpeech?.line.id, "short")
     XCTAssertTrue(model.correctCaption("owner", expectedTurn: "live:owner"))
     model.desktop.refresh()
     XCTAssertEqual(model.voices.negativeSampleCount, 1)
-    XCTAssertEqual(bubbleTexts(), ["同事发言", "我的发言"])
+    XCTAssertEqual(bubbleTexts(), ["同事发言", "我的发言", "嗯"])
+    await model.shutdown()
+  }
+
+  @MainActor func testContinuationWithNoVoiceKeepsTheSameBubble() async throws {
+    let root = try temporaryRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let model = AppModel(libraryURL: root)
+    model.preferences.captions.showInFullScreen = true
+    model.desktop.start(model: model)
+    try model.voices.recordLive(id: "live:begin", source: "card", seconds: 3, vector: [1, 0], countDuration: true)
+    let begin = LiveLine(id: "begin", segment: 1, sentence: 0, text: "还会出现", isFinal: true,
+                         voiceID: "live:begin", bubblePhrase: .init(text: "还会出现", continuesPrevious: false))
+    let end = LiveLine(id: "end", segment: 1, sentence: 1, text: "的小现象。", isFinal: true,
+                       bubblePhrase: .init(text: "的小现象。", continuesPrevious: true))
+    model.desktop.refresh(transcript: [begin])
+    model.desktop.refresh(transcript: [begin, end])
+    let rows = try XCTUnwrap(model.desktop.panel?.feedView.rootView.presentation.content.items)
+    XCTAssertEqual(rows.map(\.id), [begin.id])
+    XCTAssertEqual(rows.map(\.text), ["还会出现的小现象。"])
+    XCTAssertNil(rows.first?.voiceID)
     await model.shutdown()
   }
 
