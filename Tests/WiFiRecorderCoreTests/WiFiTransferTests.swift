@@ -1,3 +1,4 @@
+import Combine
 import WiFiRecorderCore
 import WorkdayCore
 import XCTest
@@ -10,17 +11,8 @@ final class WiFiTransferTests: XCTestCase {
       let fm = FileManager.default
       let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
       defer { try? fm.removeItem(at: root) }
-      let peer = Process()
-      let output = Pipe()
-      peer.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-      peer.arguments = [wifiFixture("tcp_peer.py").path, scenario]
-      peer.standardOutput = output
-      try peer.run()
+      let (peer, port) = try startPeer(scenario)
       defer { if peer.isRunning { peer.terminate() } }
-      let port = try XCTUnwrap(
-        UInt16(
-          String(decoding: output.fileHandleForReading.availableData, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)))
       let bytes = Data((0..<20000).map { UInt8(($0 * 31 + 7) % 256) })
       let item = try RecordingEntry(
         [0] + Array("20261116123456".utf8) + Wire.beBytes(UInt64(bytes.count)))
@@ -71,6 +63,20 @@ final class WiFiTransferTests: XCTestCase {
       client.onDownloaded = { _ in }
     }
   }
+
+  private func startPeer(_ scenario: String) throws -> (Process, UInt16) {
+    let peer = Process()
+    let output = Pipe()
+    peer.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+    peer.arguments = [wifiFixture("tcp_peer.py").path, scenario]
+    peer.standardOutput = output
+    try peer.run()
+    let portText = String(decoding: output.fileHandleForReading.availableData, as: UTF8.self)
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let port = UInt16(portText)
+    if port == nil, peer.isRunning { peer.terminate() }
+    return (peer, try XCTUnwrap(port, "The TCP peer did not report a listening port."))
+  }
 }
 
 private final class TestBluetooth: WiFiSyncBluetooth {
@@ -82,12 +88,13 @@ private final class TestBluetooth: WiFiSyncBluetooth {
   var onSocket: (() -> Void)?
   var onWiFiLost: (() -> Void)?
   var raw: UInt8 = 0
+  var reportsSocketReady = true
   var releases = 0
   var onRelease: () -> Void = {}
   func queryWiFiState() { onWiFiState?(raw) }
   func openWiFiHotspot(for id: String) {
     XCTAssertEqual(boundID, id)
-    onSocket?()
+    if reportsSocketReady { onSocket?() }
     onHotspot?(try! HotspotCredentials(Array("Test_AP00112345678".utf8)))
   }
   func releaseForWiFi() {
@@ -115,6 +122,40 @@ private final class TestNetwork: WiFiHotspotJoining {
 }
 
 extension WiFiTransferTests {
+  @MainActor func testSyncContinuesWhenCardDisconnectsBluetoothAfterListing() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let (peer, port) = try startPeer("sync")
+    defer { if peer.isRunning { peer.terminate() } }
+
+    let store = ArchiveStore(root: root)
+    let card = TestBluetooth()
+    card.reportsSocketReady = false
+    let wifi = TestNetwork()
+    let sync = WiFiRecordingSync(store: store, card: card, wifi: wifi) { client, id, _ in
+      client.connect(deviceID: id, host: "127.0.0.1", port: port, wifiOnly: false)
+    }
+    sync.attach()
+    // The card drops BLE between delivering the list and receiving the first download request.
+    let listed = sync.$pending.first { $0 == 1 }.sink { _ in
+      card.onWiFiLost?()
+      XCTAssertTrue(card.holdReconnect)
+    }
+    defer { listed.cancel() }
+    let complete = expectation(description: "archive the file after Bluetooth disconnects")
+    sync.onArchiveChange = { complete.fulfill() }
+    sync.start(id: "fixture-card")
+    await fulfillment(of: [complete], timeout: 8)
+    let records = try await store.load()
+    XCTAssertEqual(records.count, 1, sync.result)
+    XCTAssertEqual(sync.pending, 0)
+    XCTAssertEqual(wifi.restores, 1)
+    XCTAssertFalse(card.holdReconnect)
+    await sync.shutdown()
+    peer.waitUntilExit()
+    XCTAssertEqual(peer.terminationStatus, 0)
+  }
+
   @MainActor func testOneClickChecksIdleRestoresNetworkAndPublishesOnlyOnce() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -146,17 +187,9 @@ extension WiFiTransferTests {
     XCTAssertFalse(card.wifiBusy)
     card.raw = 0
     for scenario in ["sync", "repeat"] {
-      let peer = Process()
-      let output = Pipe()
-      peer.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-      peer.arguments = [wifiFixture("tcp_peer.py").path, scenario]
-      peer.standardOutput = output
-      try peer.run()
+      let (peer, listeningPort) = try startPeer(scenario)
       defer { if peer.isRunning { peer.terminate() } }
-      port = try XCTUnwrap(
-        UInt16(
-          String(decoding: output.fileHandleForReading.availableData, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)))
+      port = listeningPort
       let complete = expectation(description: scenario)
       sync.onArchiveChange = { complete.fulfill() }
       model.syncRecorder(selected)

@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | 真机实时通道 | 2026-11-17 通过蓝牙控制 FW925 开录和保存。5.22 秒样本收到 134 条 B0B3 通知，共 22,968 字节，按原始通知边界回放成功，261 个音频包均通过 final range 校验。 | 中途连接、暂停恢复，以及长录音连续性。 |
 | 真机录音文件 | 检查过的设备文件采用大端包长、Opus final range 和音频载荷。样本中有 80 字节 / 20 ms 的单声道包。7 份历史设备原件转出的 WAV 与独立参考文件逐份一致。 | 把同一次机身录音的蓝牙片段与完整原件对齐，核对开头、末尾、暂停和中途接入。文件包长不能直接推定为实时通知包长。 |
+| 真机热点同步 | 2026-11-19，FW925 建立 TCP 连接后断开蓝牙。28 段录音全部下载并归档，设备原件与 WAV 的长度和 SHA-256 均与归档记录一致，Mac 自动恢复原 Wi-Fi。 | 其他固件及真机取消续传。 |
 | 工作留声识别 | 11 月 17 日用机身按键录制三句真人口述。断句调整后的 22.68 秒样本得到三条独立定稿，每条都有回听音频，文字仍有误识。 | 用长录音检查缺口，与同次 Wi-Fi 原件核对。真实会议的文字与声纹准确率仍需独立评估。 |
 
 ## 按问题定位源码
@@ -26,6 +27,14 @@
 
 **与旧卡共用的时间轴。** 字幕和声纹入口以 40 字节代表 20 ms。兼容包可原样传递，其他已识别的包先解码为 16 kHz 单声道 PCM，再重编码为 16 kbit/s Opus。为保持预测状态，开始重编码后，同一连续片段余下的数据使用同一个编码器。录后 WAV 直接从设备文件解码，不经过这次实时转换。[旧卡协议](录音卡协议.md)
 
+## 热点同步与蓝牙交接
+
+1. App 通过蓝牙确认卡已空闲，再申请开启热点并取得凭据。Mac 加入该热点并拿到设备网段的 IPv4 地址后，App 才发起 TCP 连接。
+2. 收到卡的 Socket 就绪通知（key 32）且 TCP 已连通时，App 主动请求释放蓝牙。FW925 有时会先断开蓝牙。发起 TCP 连接后，连接超时、列表读取和下载失败都由传输层处理，蓝牙断开时继续使用 Wi-Fi。
+3. 传输结束后先尝试恢复原 Wi-Fi，恢复流程结束后解除蓝牙重连限制并归档。收到文件结束标记且长度正确的原件可以归档，未完成的下载保留断点。
+
+排查时按顺序核对蓝牙状态回复、Mac 的热点关联与设备网段地址、TCP 建立时间、蓝牙断开时间和归档结果。若 `bluetoothd` 记录 `Ignoring indication … on suspended session`，设备已经回包，macOS 暂停了该测试进程的蓝牙通知。11 月 19 日经用户同意将隔离测试版临时置于前台后完成验收。校验记录在 `~/Documents/CodexArtifacts/WorkRecorder/2026-11-19-FW925热点同步修复/validation/hardware/`。
+
 ## 下一次真机联调
 
 1. **先观察一段机身录音。** 在 Mac 保持原网络的情况下订阅蓝牙，确认 B0B3 已开启。用机身按键开始，说一段可辨认的短句，然后保存。保留逐条通知的边界、数量和长度，同时记下开始和保存的控制回复。尚未收到音频时，先区分通道订阅、机身录音状态与真实数据到达。
@@ -40,8 +49,11 @@
 ```sh
 ./script/test.sh --filter WiFiLiveAudioTests
 ./script/test.sh --filter WiFiDecoderTests
+./script/test.sh --filter WiFiTransferTests
 ./script/test.sh --full
 ./script/build_and_run.sh --build-only
 ```
 
 普通定向运行覆盖坏包、分片、暂停恢复和归档解码。中文端到端用例在 `--full` 下读取 `fixtures/apple/card.opusraw`；单独运行时可设置 `WORKDAY_APPLE_SPEECH`。将 `WORKDAY_WIFI_SAMPLES` 指向同时含有 `Recordings/` 和 `Decoded/` 的历史样本根目录，可在完整验收时复核 7 份参考 WAV。真机采样、原音频和日志留在仓库外的本次验证目录。测试入口见[实时链路回归](../Tests/WiFiRecorderCoreTests/WiFiLiveAudioTests.swift)与[归档对照回归](../Tests/WiFiRecorderCoreTests/WiFiArchiveTests.swift)。
+
+[传输回归](../Tests/WiFiRecorderCoreTests/WiFiTransferTests.swift) 使用本机 TCP 测试端模拟文件列表和下载。测试覆盖未收到 Socket 就绪通知时的蓝牙断开，以及后续下载、归档和恢复网络流程。

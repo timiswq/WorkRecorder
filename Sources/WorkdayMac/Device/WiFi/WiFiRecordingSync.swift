@@ -37,8 +37,8 @@ import WorkdayCore
   private var device = ""
   private var timeout: Task<Void, Never>?
   private var verified = Set<String>()
-  private var sawSocket = false
-  private var handedOff = false
+  private var receivedSocketReady = false
+  private var requestedBluetoothRelease = false
   private var joinedOrAttempted = false
   private var archiveTask: Task<Void, Never>?
 
@@ -53,7 +53,7 @@ import WorkdayCore
     self.wifi = wifi
     self.connectTCP = connectTCP
     transfer = TransferClient(root: store.wifiInbox)
-    transfer.onConnected = { [weak self] in self?.tryHandoff() }
+    transfer.onConnected = { [weak self] in self?.releaseBluetoothIfReady() }
     transfer.onFiles = { [weak self] in self?.filesListed($0) }
     transfer.onDownloaded = { [weak self] in self?.downloaded($0) }
     transfer.onFailure = { [weak self] in self?.finish($0) }
@@ -72,14 +72,20 @@ import WorkdayCore
     card.onHotspot = { [weak self] in self?.join($0) }
     card.onSocket = { [weak self] in
       guard let self, self.usingNetwork else { return }
-      self.sawSocket = true
-      self.tryHandoff()
+      self.receivedSocketReady = true
+      self.releaseBluetoothIfReady()
     }
     card.onWiFiLost = { [weak self] in
-      guard let self, !self.handedOff,
-        [.checking, .hotspot, .joining, .permission, .listing, .downloading].contains(self.phase)
-      else { return }
-      self.finish("录音卡蓝牙连接中断，请重新同步。")
+      guard let self else { return }
+      switch self.phase {
+      case .listing, .downloading:
+        // FW925 可能在蓝牙交接通知到达前断开蓝牙。发起 TCP 连接后，由传输层处理超时和断线。
+        // 等网络恢复流程结束再允许蓝牙重连，避免干扰当前传输。
+        self.card.holdReconnect = true
+      case .checking, .hotspot, .joining, .permission:
+        self.finish("录音卡蓝牙连接中断，请重新同步。")
+      default: break
+      }
     }
   }
   func clearDeviceResult() {
@@ -92,8 +98,8 @@ import WorkdayCore
     guard !busy, card.preferredKind == .wifi, card.boundID == id else { return }
     device = id
     generation = UUID()
-    sawSocket = false
-    handedOff = false
+    receivedSocketReady = false
+    requestedBluetoothRelease = false
     joinedOrAttempted = false
     result = ""
     batch = nil
@@ -142,9 +148,10 @@ import WorkdayCore
       }
     }
   }
-  private func tryHandoff() {
-    guard sawSocket, transfer.connected, !handedOff else { return }
-    handedOff = true
+  private func releaseBluetoothIfReady() {
+    // 收到卡的 Socket 就绪通知且 TCP 已连通时，才主动请求释放蓝牙。
+    guard receivedSocketReady, transfer.connected, !requestedBluetoothRelease else { return }
+    requestedBluetoothRelease = true
     card.releaseForWiFi()
   }
   private func filesListed(_ files: [RecordingEntry]) {
