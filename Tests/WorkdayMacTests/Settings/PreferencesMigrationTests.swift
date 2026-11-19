@@ -11,8 +11,10 @@ final class PreferencesMigrationTests: XCTestCase {
       let old = try decoder.decode(Preferences.self, from: Data(json.utf8))
       XCTAssertEqual(old.boundName, "我的录音卡")
       XCTAssertEqual(old.liveModel, .streaming)
+      XCTAssertTrue(old.cleanCardAfterSync)
     }
     var prefs = Preferences()
+    prefs.cleanCardAfterSync = false
     let previous = try decoder.decode(Preferences.self, from: Data(#"{"onlyMySpeech":true}"#.utf8))
     XCTAssertTrue(previous.captions.enabled)
     let migrated = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(previous)) as? [String: Any])
@@ -23,6 +25,7 @@ final class PreferencesMigrationTests: XCTestCase {
       prefs.liveModel = live
       let saved = try decoder.decode(Preferences.self, from: JSONEncoder().encode(prefs))
       XCTAssertEqual(saved.liveModel, live)
+      XCTAssertFalse(saved.cleanCardAfterSync)
     }
   }
 
@@ -41,11 +44,13 @@ final class PreferencesMigrationTests: XCTestCase {
     previous.cloudEnabled = true
     previous.realtime = false
     var legacyFields = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(previous)) as? [String: Any])
+    legacyFields.removeValue(forKey: "useMacMicrophone")
     legacyFields["workspaceID"] = "retired-workspace"
     let data = try JSONSerialization.data(withJSONObject: legacyFields)
     defaults.setPersistentDomain([key: data], forName: legacy)
 
     let imported = Preferences.load(defaults: defaults, legacyDomain: legacy)
+    XCTAssertFalse(imported.useMacMicrophone)
     XCTAssertEqual(imported.boundID, previous.boundID)
     XCTAssertEqual(imported.libraryPath, previous.libraryPath)
     XCTAssertTrue(imported.cloudEnabled)

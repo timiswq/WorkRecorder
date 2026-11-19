@@ -199,7 +199,7 @@ final class WifiJoiner: NSObject, CLLocationManagerDelegate {
         return
       }
       guard interface.powerOn() else {
-        DispatchQueue.main.async { completion("Wi-Fi已关闭，保留当前设置；录音已保存") }
+        DispatchQueue.main.async { completion("Wi-Fi 已关闭，保留当前设置。") }
         return
       }
       DispatchQueue.main.async { completion("原 Wi-Fi 尚未恢复，可在系统 Wi-Fi 设置中重新连接。") }

@@ -13,7 +13,8 @@ import Speech
   private var closed = false
   private var phrases = AppleCaptionPhrases()
   public func bubblePhrase(for sentence: Int) -> AppleBubblePhrase? { phrases.bubblePhrases[sentence] }
-  public init() {}
+  private let audioInput: CaptionAudioInput
+  public init(input: CaptionAudioInput = .cardOpus) { audioInput = input }
 
   public func start() {
     guard run == nil, !closed else { return }
@@ -32,7 +33,7 @@ import Speech
         guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [module]) else {
           throw WorkdayError.invalid("无法取得苹果本地识别的音频格式")
         }
-        let decoder = try InputDecoder(format: format)
+        let decoder = try InputDecoder(input: audioInput, format: format)
         let analyzer = SpeechAnalyzer(modules: [module])
         self.analyzer = analyzer
         try await analyzer.prepareToAnalyze(in: format)
@@ -65,15 +66,19 @@ import Speech
   }
 
   private actor InputDecoder {
-    private let decoder: CardOpusDecoder
+    private let decoder: CaptionAudioDecoder
+    private let packetBytes: Int
     private var remainder = Data()
     private var pauses = CaptionAudioPauses()
     var boundaries: [Double] { pauses.boundaries }
-    init(format: AVAudioFormat) throws { decoder = try CardOpusDecoder(outputFormat: format) }
+    init(input: CaptionAudioInput, format: AVAudioFormat) throws {
+      packetBytes = input.packetBytes
+      decoder = try CaptionAudioDecoder(input: input, outputFormat: format)
+    }
 
     func input(for data: Data) throws -> AnalyzerInput? {
       remainder.append(data)
-      let bytes = remainder.count / 40 * 40
+      let bytes = remainder.count / packetBytes * packetBytes
       guard bytes > 0 else { return nil }
       let buffer = try decoder.decode(remainder.prefix(bytes))
       remainder.removeFirst(bytes)
@@ -118,7 +123,7 @@ import Speech
     bufferedBytes += data.count
     // Bound the backlog while a model loads. Mark overload explicitly so the next
     // session starts with a clean decoder and an accurate audio timeline.
-    if bufferedBytes <= 240_000, case .enqueued = input.continuation.yield(data) { return }
+    if bufferedBytes <= 120 * audioInput.bytesPerSecond, case .enqueued = input.continuation.yield(data) { return }
     cancel()
     onEvent?(.failed(code: "local-speech", message: "苹果字幕处理积压，正在重新连接本地识别"))
   }

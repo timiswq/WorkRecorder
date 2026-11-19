@@ -11,14 +11,17 @@ final class TransferClient {
   private var files: [RecordingEntry] = []
   var onConnected: () -> Void = {}
   var onFiles: ([RecordingEntry]) -> Void = { _ in }
+  var onPartialList: (Int) -> Void = { _ in }
+  var onDownloadStart: (UInt64, UInt64) -> Void = { _, _ in }
   var onProgress: (UInt64, UInt64) -> Void = { _, _ in }
   var onDownloaded: (URL) -> Void = { _ in }
   var onFailure: (String) -> Void = { _ in }
   private var connection: NWConnection?
   private var generation = UUID()
   private var parser = TCPParser()
-  private var incoming: [String: RecordingEntry] = [:]
+  private var incoming = RecordingList()
   private var sink: DownloadSink?
+  private(set) var downloadedFromStart = false
   private let storage: DownloadStore
   private var active: RecordingEntry?
   private var heartbeat: Timer?
@@ -93,7 +96,7 @@ final class TransferClient {
   private func refresh() {
     guard state == .ready else { return }
     state = .listing
-    incoming.removeAll()
+    incoming = RecordingList()
     files.removeAll()
     arm(10, "未收到完整列表结束标记")
     send(10)
@@ -129,21 +132,14 @@ final class TransferClient {
       throw WiFiRecorderError.invalid("设备在结束标记后仍发文件数据，已保留断点，请重新连接")
     }
     if frame.key == 10 && state == .listing {
-      guard let status = b.first else { throw WiFiRecorderError.invalid("列表应答没有状态") }
-      if status == 0 {
-        let f = try RecordingEntry(b)
-        if let previous = incoming[f.id], previous != f {
-          throw WiFiRecorderError.invalid("同一录音在清单中的大小发生变化，请重试")
-        }
-        incoming[f.id] = f
-        arm(10, "列表无进展，未允许下载")
-      } else {
-        // Fail closed for statuses not actually observed on this device generation.
-        guard status == 2 else { throw WiFiRecorderError.invalid("未知列表结束状态\(status)，请核对固件") }
+      if let rows = try incoming.accept(b) {
         deadline?.cancel()
-        files = incoming.values.sorted { $0.name > $1.name }
+        files = rows
         state = .ready
         onFiles(files)
+      } else {
+        onPartialList(incoming.discoveredCount)
+        arm(10, "列表无进展，未允许下载")
       }
     } else if frame.key == 11 && state == .downloading, let sink, let active {
       if b == [2], sink.received < sink.expected {
@@ -173,6 +169,7 @@ final class TransferClient {
   func download(_ item: RecordingEntry, resume: Bool = true) {
     guard state == .ready, files.contains(item) else { return }
     tailAttempts = 0
+    downloadedFromStart = false
     error = ""
     do { try beginDownload(item, resume: resume) } catch { fail(error.localizedDescription) }
   }
@@ -185,9 +182,12 @@ final class TransferClient {
       return
     }
     let s = try storage.begin(device: deviceID, file: item, resume: resume)
+    // Tail recovery continues the same download, while a saved partial can predate this session.
+    if tailAttempts == 0 { downloadedFromStart = s.offset == 0 }
     active = item
     sink = s
     state = .downloading
+    onDownloadStart(s.offset, s.expected)
     arm(20, "下载无进展，断点保留")
     send(11, try Wire.download(item, s.offset))
   }
@@ -254,7 +254,7 @@ final class TransferClient {
     cleanup()
     state = .disconnected
     files.removeAll()
-    incoming.removeAll()
+    incoming = RecordingList()
     parser = TCPParser()
   }
   private func cleanup() {

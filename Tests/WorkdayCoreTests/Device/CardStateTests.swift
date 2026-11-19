@@ -7,15 +7,19 @@ final class CardStateTests: XCTestCase {
   func testWiFiStorageSurvivesRecordingEventsAndClearsOnDisconnect() {
     var card = CardState()
     card.connected = true
-    card.updateWiFi(raw: 1, battery: 80, freeStorageFraction: 0.75)
+    card.updateWiFi(raw: 1, battery: 80, storage: .init(totalMegabytes: 2000, freeMegabytes: 1500))
     card.updateWiFi(event: .started, filename: "20261117103000")
     card.updateWiFi(event: .paused, filename: nil)
     XCTAssertEqual(card.filename, "20261117103000")
     XCTAssertEqual(card.freeStorageFraction, 0.75)
+    XCTAssertEqual(card.totalBytes, 2_000_000_000)
+    XCTAssertEqual(card.freeBytes, 1_500_000_000)
     card.updateWiFi(event: .started, filename: nil)
     XCTAssertNil(card.filename, "新录音尚未上报文件名时不能展示上一段录音")
     card.disconnect()
     XCTAssertNil(card.freeStorageFraction)
+    XCTAssertNil(card.totalBytes)
+    XCTAssertNil(card.freeBytes)
   }
 
   func frame(_ bytes: [UInt8]) -> Frame {

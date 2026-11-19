@@ -268,6 +268,12 @@ struct SettingsView: View {
       }
       Divider()
       row {
+        Text("同步后清理卡内副本")
+        Spacer()
+        Toggle("同步后清理卡内副本", isOn: $model.preferences.cleanCardAfterSync).labelsHidden()
+      }
+      Divider()
+      row {
         Text("同步后自动整理")
         Spacer()
         Toggle("同步后自动整理", isOn: $model.preferences.autoOrganize).labelsHidden().onChange(
@@ -277,7 +283,7 @@ struct SettingsView: View {
       Divider()
       row {
         Image(systemName: "internaldrive").foregroundStyle(Palette.muted)
-        Text("USB 录音校验后自动清理卡内副本。完整原件和剪辑保存在 Mac 上。").font(.system(size: 11)).foregroundStyle(Palette.muted)
+        Text("适用于 USB 和 Wi-Fi。Mac 归档通过校验后才清理卡内对应副本。").font(.system(size: 11)).foregroundStyle(Palette.muted)
         Spacer()
       }
     }

@@ -7,7 +7,8 @@ import Speech
 @MainActor public final class DictationCaptionConnection: AppleBubbleStreaming {
   public var onEvent: ((ASREvent) -> Void)?
   private let recognizer: SFSpeechRecognizer
-  private let decoder: CardOpusDecoder
+  private let decoder: CaptionAudioDecoder
+  private let audioInput: CaptionAudioInput
   private let request = SFSpeechAudioBufferRecognitionRequest()
   private var task: SFSpeechRecognitionTask?
   private var phrases = AppleCaptionPhrases()
@@ -17,13 +18,14 @@ import Speech
   private var waitingBytes = 0
   private var closed = false
 
-  public init() throws {
+  public init(input: CaptionAudioInput = .cardOpus) throws {
+    audioInput = input
     guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")),
       recognizer.supportsOnDeviceRecognition, recognizer.isAvailable,
       let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)
     else { throw WorkdayError.invalid("此 Mac 的本地中文听写不可用，请检查系统听写语言") }
     self.recognizer = recognizer
-    decoder = try CardOpusDecoder(outputFormat: format)
+    decoder = try CaptionAudioDecoder(input: input, outputFormat: format)
     request.requiresOnDeviceRecognition = true
     request.shouldReportPartialResults = true
     request.addsPunctuation = true
@@ -71,10 +73,10 @@ import Speech
     guard !closed else { return }
     if task == nil {
       waitingBytes += data.count
-      guard waitingBytes <= 120_000 else { fail("本地听写授权等待超时"); return }
+      guard waitingBytes <= 60 * audioInput.bytesPerSecond else { fail("本地听写授权等待超时"); return }
     }
     remainder.append(data)
-    let count = remainder.count / 40 * 40
+    let count = remainder.count / audioInput.packetBytes * audioInput.packetBytes
     guard count > 0 else { return }
     do {
       let pcm = try decoder.decode(remainder.prefix(count))

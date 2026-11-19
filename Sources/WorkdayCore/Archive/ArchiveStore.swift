@@ -38,6 +38,17 @@ public actor ArchiveStore {
     transfer: @Sendable (TransferProgress) -> Void = { _ in },
     progress: @Sendable (Double) -> Void = { _ in }
   ) throws -> Recording {
+    try importAudioWithOutcome(
+      url, sourceID: sourceID, companionName: companionName, volumeUUID: volumeUUID,
+      transfer: transfer, progress: progress).recording
+  }
+
+  /// `saved` also includes an OPUS companion newly added to an existing WAV archive.
+  public func importAudioWithOutcome(
+    _ url: URL, sourceID: String, companionName: String? = nil, volumeUUID: String? = nil,
+    transfer: @Sendable (TransferProgress) -> Void = { _ in },
+    progress: @Sendable (Double) -> Void = { _ in }
+  ) throws -> (recording: Recording, saved: Bool) {
     let fm = FileManager.default
     guard ["wav", "m4a", "mp3", "aiff", "aif"].contains(url.pathExtension.lowercased()) else {
       throw WorkdayError.invalid("请选择 WAV、M4A、MP3 或 AIFF 文件。设备原始 OPUS 会随同名 WAV 一起保存。")
@@ -110,11 +121,13 @@ public actor ArchiveStore {
         == hash
     {
       existing.sourceAliases = Array(Set((existing.sourceAliases ?? []) + [sourceID])).sorted()
+      var addedCompanion = false
       if let pairedHash {
         let pairedDestination = root.appendingPathComponent(existing.folder).appendingPathComponent(
           "original.opus")
         if !fm.fileExists(atPath: pairedDestination.path) {
           try fm.moveItem(at: pairedCopy, to: pairedDestination)
+          addedCompanion = true
         }
         guard try Files.hash(pairedDestination) == pairedHash else {
           throw WorkdayError.invalid("配对 OPUS 与已有归档不一致，已保留两侧原件，请核对")
@@ -126,7 +139,7 @@ public actor ArchiveStore {
         existing,
         to: root.appendingPathComponent(existing.folder).appendingPathComponent("recording.json"))
       progress(1)
-      return existing
+      return (existing, addedCompanion)
     }
     let item = Recording(
       id: id, startedAt: started, importedAt: Date(), originalName: url.lastPathComponent,
@@ -138,7 +151,7 @@ public actor ArchiveStore {
       attributes: [.posixPermissions: 0o700])
     try fm.moveItem(at: staging, to: destination)
     progress(1)
-    return item
+    return (item, true)
   }
 }
 

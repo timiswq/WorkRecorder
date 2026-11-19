@@ -14,20 +14,22 @@ struct Preferences: Codable {
   var selectedRecorderName: String { recorderKind == .wifi ? wifiBoundName ?? "Wi-Fi 录音卡" : boundName }
   var autoConnect = true
   var autoSync = true
+  var cleanCardAfterSync = true
   var autoOrganize = true
   var cloudEnabled = false
   var realtime = true
   var liveModel: LiveASRModel = .streaming
   var theme = "system"
+  var useMacMicrophone = false
   var captions = CaptionPreferences()
   var libraryPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(
     "Documents/工作留声"
   ).path
   init() {}
   private enum CodingKeys: String, CodingKey {
-    case boundID, boundName, autoConnect, autoSync, autoOrganize, cloudEnabled, realtime
+    case boundID, boundName, autoConnect, autoSync, cleanCardAfterSync, autoOrganize, cloudEnabled, realtime
     case recorderKind, wifiBoundID, wifiBoundName, usbOnlyVolumeID, usbOnlyVolumeName
-    case liveModel, theme, captions, libraryPath
+    case liveModel, theme, captions, libraryPath, useMacMicrophone
   }
   init(from decoder: Decoder) throws {
     self.init()
@@ -41,6 +43,8 @@ struct Preferences: Codable {
     boundName = try values.decodeIfPresent(String.self, forKey: .boundName) ?? boundName
     autoConnect = try values.decodeIfPresent(Bool.self, forKey: .autoConnect) ?? autoConnect
     autoSync = try values.decodeIfPresent(Bool.self, forKey: .autoSync) ?? autoSync
+    cleanCardAfterSync = try values.decodeIfPresent(Bool.self, forKey: .cleanCardAfterSync)
+      ?? cleanCardAfterSync
     autoOrganize = try values.decodeIfPresent(Bool.self, forKey: .autoOrganize) ?? autoOrganize
     cloudEnabled = try values.decodeIfPresent(Bool.self, forKey: .cloudEnabled) ?? cloudEnabled
     realtime = try values.decodeIfPresent(Bool.self, forKey: .realtime) ?? realtime
@@ -49,6 +53,7 @@ struct Preferences: Codable {
       liveModel = saved == "qwen-audio-3.1-asr-flash-filetrans" ? .segment : LiveASRModel(rawValue: saved) ?? .streaming
     }
     theme = try values.decodeIfPresent(String.self, forKey: .theme) ?? theme
+    useMacMicrophone = try values.decodeIfPresent(Bool.self, forKey: .useMacMicrophone) ?? false
     captions = try values.decodeIfPresent(CaptionPreferences.self, forKey: .captions) ?? captions
     libraryPath = try values.decodeIfPresent(String.self, forKey: .libraryPath) ?? libraryPath
   }

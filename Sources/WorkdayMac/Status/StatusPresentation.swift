@@ -104,8 +104,15 @@ extension AppModel {
 
     var activities: [StatusActivity] = []
     if usesWiFiCard, wifiSync.busy || !wifiSync.result.isEmpty {
+      let state: StatusActivity.State = if wifiSync.busy {
+        .working
+      } else if wifiSync.pendingCleanup > 0 && preferences.cleanCardAfterSync {
+        .needsAction
+      } else {
+        .information
+      }
       activities.append(.init(id: "sync", title: wifiSync.busy ? wifiSync.message : "Wi-Fi 录音同步",
-                              detail: wifiSync.result, state: wifiSync.busy ? .working : .information,
+                              detail: wifiSync.result, state: state,
                               action: .device))
     } else if !usesWiFiCard && (!usb.volumes.isEmpty || pendingCount.total > 0) {
       let sync = cardSync

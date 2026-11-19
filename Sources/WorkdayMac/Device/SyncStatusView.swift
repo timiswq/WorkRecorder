@@ -84,7 +84,10 @@ extension AppModel {
         }
         return .init(title: "卡内暂无已保存的录音", instruction: "这不代表录音已经停止。录音与保存请在卡上操作。", phase: .empty)
       }
-      return .init(title: "原件已保存在 Mac", instruction: "原始录音可查看和回听。保持 USB 连接，卡内副本核对一致后会删除。", phase: .saved)
+      let instruction = preferences.cleanCardAfterSync
+        ? "原始录音可查看和回听。保持 USB 连接，卡内副本核对一致后会删除。"
+        : "原始录音可查看和回听。卡内副本已保留。"
+      return .init(title: "原件已保存在 Mac", instruction: instruction, phase: .saved)
     }
     if count.total > 0, count.total == count.unsupported {
       return .init(title: "\(count.total) 段录音暂未保存到 Mac", instruction: "这些 OPUS 录音缺少配对的 WAV 文件。请保留卡内文件，可在同步详情查看原因。", phase: .unsupported)
@@ -109,17 +112,10 @@ extension AppModel {
 struct SyncStatusView: View {
   @ObservedObject var model: AppModel
   var showsOriginalsAction = true
-  var onDevicePage = false
-  @State private var showsDetails = false
-
-  @ViewBuilder var body: some View {
-    if onDevicePage {
-      content
-    } else {
-      content.padding(18)
-        .background(Palette.surface, in: RoundedRectangle(cornerRadius: 9))
-        .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Palette.line))
-    }
+  var body: some View {
+    content.padding(18)
+      .background(Palette.surface, in: RoundedRectangle(cornerRadius: 9))
+      .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Palette.line))
   }
 
   private var content: some View {
@@ -154,8 +150,7 @@ struct SyncStatusView: View {
           } else if state.hasSavedOriginals && showsOriginalsAction {
             Button("查看原始录音") { model.showOriginals() }.buttonStyle(.borderedProminent)
           }
-          Button("同步详情") { showsDetails.toggle() }.buttonStyle(.bordered)
-            .popover(isPresented: $showsDetails) { details }
+          CardSyncDetailsButton(model: model)
         }.padding(.top, 5)
       }
       Spacer(minLength: 0)
@@ -163,6 +158,17 @@ struct SyncStatusView: View {
     .controlSize(.small)
     .frame(maxWidth: .infinity, alignment: .leading)
     .accessibilityElement(children: .contain).accessibilityIdentifier("card-sync")
+  }
+
+}
+
+struct CardSyncDetailsButton: View {
+  @ObservedObject var model: AppModel
+  @State private var showsDetails = false
+
+  var body: some View {
+    Button("同步详情") { showsDetails.toggle() }.buttonStyle(.bordered)
+      .popover(isPresented: $showsDetails) { details }
   }
 
   private var details: some View {
@@ -173,7 +179,9 @@ struct SyncStatusView: View {
         Text("Mac 尚未识别到录音卡磁盘。如果已接线，请检查数据线，并确认能在访达中打开录音卡。")
           .foregroundStyle(.secondary)
       }
-      Text("每段录音校验一致后自动删除卡内副本，转写和整理使用 Mac 上的原件。文件保存完成与文字整理完成分别显示。")
+      Text(model.preferences.cleanCardAfterSync
+        ? "每段录音校验一致后清理卡内副本，转写和整理使用 Mac 上的原件。"
+        : "同步后保留卡内副本，转写和整理使用 Mac 上的原件。")
       Text(model.syncStatus)
       if !model.syncDetail.isEmpty { Text(model.syncDetail).foregroundStyle(.secondary) }
       ForEach(model.currentInventories, id: \.sourceID) { inventory in

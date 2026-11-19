@@ -68,7 +68,7 @@ struct CaptionTransition {
     let stack = motion && animateStack
     let old = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
     var visible = items.map { item in
-      let hasWave = item.isSoundFeedback || (!item.isFinal && item.id == items.last?.id)
+      let hasWave = item.isSoundFeedback || (!item.isFinal && item.id == items.last(where: { $0.inputLabel == item.inputLabel })?.id)
       let open: CGFloat = item.isSoundFeedback ? 0 : 1
       var row = old[item.id] ?? Row(caption: item, presence: .init(stack ? 0 : 1), expansion: .init(open),
                                     wave: .init(hasWave ? 1 : 0), reservesWave: hasWave)
@@ -129,6 +129,7 @@ struct CaptionTransition {
 struct CaptionFeedView: View {
   @ObservedObject var presentation: CaptionFeedPresentation
   var meter: LiveAudioMeter?
+  var micMeter: LiveAudioMeter?
   var correct: ((DesktopCaption, CaptionVoiceActions.Action) -> Void)? = nil
   var dismiss: ((String) -> Void)? = nil
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -143,7 +144,7 @@ struct CaptionFeedView: View {
         CaptionReveal(progress: CaptionReveal.envelope(presence)) {
           CaptionBubble(
             caption: caption, username: caption.speakerLabel ?? presentation.content.username,
-            preview: presentation.content.preview, meter: presentation.content.preview ? nil : meter, time: now,
+            preview: presentation.content.preview, meter: presentation.content.preview ? nil : (caption.inputLabel == .microphone ? micMeter : meter), time: now,
             expansion: row.expansion.value(at: now),
             waveOpacity: wave, reservesWave: row.reservesWave,
             inkOpacity: row.presence.to == 1 ? CaptionReveal.ink(presence) : presence)
@@ -233,9 +234,10 @@ final class CaptionPanel: NSPanel {
 }
 
 enum CaptionPlacement {
-  static func frame(in visibleFrame: CGRect) -> CGRect {
+  static func frame(in visibleFrame: CGRect, comparing: Bool = false) -> CGRect {
     let width = min(360, max(1, visibleFrame.width - 32))
-    let height = min(CGFloat(DesktopCaptionState.maximumVisible * 85 + 12), max(1, visibleFrame.height - 32))
+    let rows = DesktopCaptionState.maximumVisible * (comparing ? 2 : 1)
+    let height = min(CGFloat(rows * 85 + 12), max(1, visibleFrame.height - 32))
     return CGRect(
       x: visibleFrame.maxX - width - 16, y: visibleFrame.maxY - height - 6,
       width: width, height: height)

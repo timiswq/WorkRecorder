@@ -17,11 +17,11 @@ public final class CardSpeechActivity {
 
   /// A pause is acknowledged only once the recognizer can close at the analyzed
   /// audio position. If capture is ahead, check again as the detector catches up.
-  public init(onEvent: @escaping @MainActor @Sendable (Event) -> Void,
+  public init(input audioInput: CaptionAudioInput = .cardOpus, onEvent: @escaping @MainActor @Sendable (Event) -> Void,
               onConfirmedPause: (@MainActor @Sendable (Range<Int>) -> Bool)? = nil) {
     let stream = input.stream
     worker = Task.detached(priority: .userInitiated) {
-      guard let detector = Detector() else { return }
+      guard let detector = Detector(input: audioInput) else { return }
       var expectedOffset: Int?
       for await chunk in stream {
         guard !Task.isCancelled else { return }
@@ -54,7 +54,8 @@ public final class CardSpeechActivity {
   final class Detector {
     let vad: OpaquePointer
     let format: AVAudioFormat
-    var decoder: CardOpusDecoder?
+    let input: CaptionAudioInput
+    var decoder: CaptionAudioDecoder?
     var remainder = Data()
     var skip = 0
     var origin = 0
@@ -65,10 +66,11 @@ public final class CardSpeechActivity {
       // Give a resumed utterance time to reactivate the VAD, including at its
       // maximum speech duration. Measure this on decoded audio, even during replay.
       guard let endedAtFrame, frames - endedAtFrame >= 6400 else { return nil }
-      return origin + endedAtFrame / 8
+      return origin + input.byteOffset(frames: endedAtFrame)
     }
 
-    init?() {
+    init?(input: CaptionAudioInput = .cardOpus) {
+      self.input = input
       guard let url = Bundle.module.url(forResource: "silero_vad", withExtension: "onnx"),
             let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1) else { return nil }
       self.format = format
@@ -95,7 +97,7 @@ public final class CardSpeechActivity {
       SherpaOnnxVoiceActivityDetectorReset(vad)
       decoder = nil
       remainder.removeAll(keepingCapacity: true)
-      skip = (40 - offset % 40) % 40
+      skip = (input.packetBytes - offset % input.packetBytes) % input.packetBytes
       origin = offset + skip
       frames = 0
       speaking = false
@@ -105,9 +107,9 @@ public final class CardSpeechActivity {
       let skipped = min(skip, packets.count)
       skip -= skipped
       remainder.append(packets.dropFirst(skipped))
-      let count = remainder.count / 40 * 40
+      let count = remainder.count / input.packetBytes * input.packetBytes
       guard count > 0 else { return [] }
-      if decoder == nil { decoder = try CardOpusDecoder(outputFormat: format) }
+      if decoder == nil { decoder = try CaptionAudioDecoder(input: input, outputFormat: format) }
       guard let decoder else { return [] }
       let buffer = try decoder.decode(remainder.prefix(count))
       remainder.removeFirst(count)
@@ -125,7 +127,7 @@ public final class CardSpeechActivity {
           speaking = active
           endedAtFrame = active ? nil : frames
           // 16 kHz PCM and 2,000 Opus bytes/s. Include the onset confirmation window.
-          events.append(active ? .began(offset: origin + max(0, frames - 2560) / 8) : .ended)
+          events.append(active ? .began(offset: origin + input.byteOffset(frames: max(0, frames - 2560))) : .ended)
         }
         while SherpaOnnxVoiceActivityDetectorEmpty(vad) == 0 { SherpaOnnxVoiceActivityDetectorPop(vad) }
       }

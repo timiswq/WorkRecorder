@@ -64,6 +64,7 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
   var onHotspot: ((HotspotCredentials) -> Void)?
   var onSocket: (() -> Void)?
   var onWiFiLost: (() -> Void)?
+  var onWiFiFilePacket: ((Packet) -> Void)?
   private var cancellingConnection = false
 
   func releaseForWiFi() {
@@ -183,6 +184,13 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
     // 手动断开和 USB 切换也会触发系统回调，每次就绪连接只交付一次音频结束边界。
     if wasConnected { onStreamReset?(.disconnected) }
   }
+  func refreshUSBCardBluetoothInventory(for id: String) {
+    guard preferredKind == .usb, boundID == id, stateDeviceID == id,
+      switchingTo == nil, !suspended, state.connected, state.phase == .idle, state.isFresh(),
+      session?.inspecting == false, !listing.running else { return }
+    query(.files)
+  }
+
   func synchronizeClock() {
     guard let session, state.phase == .idle, state.isFresh() else { return }
     do {
@@ -348,19 +356,20 @@ final class CardObserver: NSObject, ObservableObject, CBCentralManagerDelegate, 
       if !available && self.state.phase == .recording { self.wifiBoundary(.corrupted) }
     }
     link.onState = { [weak self] report in
-      self?.receiveWiFiState(report.recordingCode, battery: report.battery, freeStorageFraction: report.freeStorageFraction)
+      self?.receiveWiFiState(report.recordingCode, battery: report.battery, storage: report.storage)
     }
     link.onRecordingEvent = { [weak self] event, name in self?.receiveWiFiEvent(event, name: name) }
     link.onAudio = { [weak self] data in self?.receiveWiFiAudio(data) }
     link.onHotspot = { [weak self] in self?.onHotspot?($0) }
     link.onSocket = { [weak self] in self?.onSocket?() }
+    link.onFilePacket = { [weak self] in self?.onWiFiFilePacket?($0) }
     link.onFailure = { [weak self] in self?.fail($0) }
     link.open(service)
   }
 
-  func receiveWiFiState(_ raw: UInt8, battery: Int?, freeStorageFraction: Double? = nil) {
+  func receiveWiFiState(_ raw: UInt8, battery: Int?, storage: WiFiCardStatus.Storage? = nil) {
     let previous = state.phase
-    state.updateWiFi(raw: raw, battery: battery, freeStorageFraction: freeStorageFraction)
+    state.updateWiFi(raw: raw, battery: battery, storage: storage)
     wifiPhaseChanged(from: previous)
     onWiFiState?(raw)
   }

@@ -68,9 +68,10 @@ public struct DeviceInventory: Codable, Equatable, Sendable {
 
   public func pendingEntries(recordings: [Recording], linkedSources: Set<String>, activeName: String?) -> [InventoryEntry] {
     let sources = linkedSources.union([sourceID])
+    let recordingsByStem = Dictionary(grouping: recordings) { InventoryEntry.stem($0.originalName) }
     return Dictionary(grouping: entries, by: \.stem).compactMap { stem, files in
       guard activeName.map(InventoryEntry.stem) != stem else { return nil }
-      let sameNames = recordings.filter { InventoryEntry.stem($0.originalName) == stem }
+      let sameNames = recordingsByStem[stem] ?? []
       let confirmed = sameNames.contains { record in
         guard !sources.isDisjoint(with: Set([record.sourceID] + (record.sourceAliases ?? [])))
         else { return false }

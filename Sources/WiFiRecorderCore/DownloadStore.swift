@@ -4,12 +4,18 @@ import Foundation
 public final class DownloadStore {
   public let root: URL
   public init(root: URL) { self.root = root }
-  public func url(device: String, file: RecordingEntry, partial: Bool) -> URL {
+  public static func directoryName(for device: String) -> String {
     let identity = SHA256.hash(data: Data(device.utf8)).prefix(12).map {
       String(format: "%02x", $0)
     }.joined()
-    return root.appendingPathComponent("device_" + identity).appendingPathComponent(
-      "\(file.id)_\(file.size).\(partial ? "part" : "bin")")
+    return "device_\(identity)"
+  }
+  public static func key(device: String, file: RecordingEntry) -> String {
+    "\(directoryName(for: device))/\(file.id)_\(file.size).bin"
+  }
+  public func url(device: String, file: RecordingEntry, partial: Bool) -> URL {
+    let completed = root.appendingPathComponent(Self.key(device: device, file: file))
+    return partial ? completed.deletingPathExtension().appendingPathExtension("part") : completed
   }
   public func completed(device: String, file: RecordingEntry) -> URL? {
     let p = url(device: device, file: file, partial: false)

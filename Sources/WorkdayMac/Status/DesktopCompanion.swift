@@ -21,16 +21,15 @@ struct CaptionDisplay: Identifiable, Equatable {
   private var dismissPanels: [String: CaptionDismissPanel] = [:]
   private weak var model: AppModel?
   private var subscription: AnyCancellable?
-  private var speechSubscription: AnyCancellable?
+  private var speechSubscriptions = Set<AnyCancellable>()
   private var refreshTask: Task<Void, Never>?
   private var animationTask: Task<Void, Never>?
   private var hoverTask: Task<Void, Never>?
   private var observers: [(NotificationCenter, NSObjectProtocol)] = []
-  private var captions = DesktopCaptionState()
-  private var lastTranscript: [LiveLine] = []
-  private var listening: PendingCaption?
+  private var cardFeed = DesktopCaptionFeed()
+  private var micFeed = DesktopCaptionFeed()
+  private var comparing = false
   private var displayLines: [String: LiveLine] = [:]
-  private var retiredLineIDs = Set<String>()
   private var identityRevision = -1
   private let presentation = CaptionFeedPresentation()
   private var rendered = CaptionFeedPresentation.Content()
@@ -59,11 +58,22 @@ struct CaptionDisplay: Identifiable, Equatable {
       updateActions(for: rendered.items, pointer: NSEvent.mouseLocation)
     }
     updateDisplays()
-    lastTranscript = model.captionSelection.lines
-    retiredLineIDs = Set(lastTranscript.map(\.id))
-    speechSubscription = model.captionSelection.$lines.dropFirst().sink { [weak self] lines in
+    comparing = model.preferences.useMacMicrophone && model.preferences.captions.enabled
+    cardFeed.receive(comparing ? model.localCaptions.lines : model.captionSelection.lines, pending: nil)
+    cardFeed.retireTranscript()
+    model.captionSelection.$lines.dropFirst().sink { [weak self, weak model] lines in
+      guard model?.preferences.useMacMicrophone != true else { return }
       self?.refresh(transcript: lines)
-    }
+    }.store(in: &speechSubscriptions)
+    model.localCaptions.$lines.dropFirst().sink { [weak self, weak model] lines in
+      guard model?.preferences.useMacMicrophone == true else { return }
+      self?.refresh(transcript: lines)
+    }.store(in: &speechSubscriptions)
+    model.microphone.preview.$lines.dropFirst().sink { [weak self] lines in
+      self?.refresh(microphoneTranscript: lines)
+    }.store(in: &speechSubscriptions)
+    model.microphone.preview.$pendingSpeech.removeDuplicates().dropFirst().receive(on: RunLoop.main)
+      .sink { [weak self] _ in self?.refresh() }.store(in: &speechSubscriptions)
     subscription = model.objectWillChange.receive(on: RunLoop.main).sink { [weak self] _ in
       self?.refresh()
     }
@@ -107,7 +117,7 @@ struct CaptionDisplay: Identifiable, Equatable {
     previewTask = nil
     presentation.geometryDidChange = nil
     subscription = nil
-    speechSubscription = nil
+    speechSubscriptions.removeAll()
     for (center, token) in observers { center.removeObserver(token) }
     observers = []
     transition += 1
@@ -117,11 +127,9 @@ struct CaptionDisplay: Identifiable, Equatable {
     lastHoverPoint = nil
     panel?.close()
     panel = nil
-    captions = DesktopCaptionState()
-    lastTranscript = []
-    listening = nil
+    cardFeed = DesktopCaptionFeed()
+    micFeed = DesktopCaptionFeed()
     displayLines = [:]
-    retiredLineIDs = []
     rendered = .init()
     presentation.update([], username: "", preview: false, animated: false)
     previewStartedAt = nil
@@ -166,16 +174,15 @@ struct CaptionDisplay: Identifiable, Equatable {
     guard rendered.items.contains(where: { $0.id == id }) else { return }
     if rendered.preview {
       dismissedPreviewIDs.insert(id)
-    } else {
-      if rendered.items.first(where: { $0.id == id })?.isSoundFeedback == true {
-        retiredLineIDs.insert(id)
-      }
-      captions.dismiss(id: id)
+    } else if let item = rendered.items.first(where: { $0.id == id }) {
+      let feed = item.inputLabel == .microphone ? micFeed : cardFeed
+      feed.dismiss(id: id, isSoundFeedback: item.isSoundFeedback)
     }
     refresh(animateStack: false)
   }
 
-  func refresh(now: Date = Date(), transcript: [LiveLine]? = nil, pointer: NSPoint = NSEvent.mouseLocation,
+  func refresh(now: Date = Date(), transcript: [LiveLine]? = nil, microphoneTranscript: [LiveLine]? = nil,
+               pointer: NSPoint = NSEvent.mouseLocation,
                animateStack: Bool = true) {
     guard let model else { return }
     let next = model.deviceStatus(at: now)
@@ -188,50 +195,54 @@ struct CaptionDisplay: Identifiable, Equatable {
     if suppressed { previewStartedAt = nil }
     let elapsed = previewStartedAt.map { now.timeIntervalSince($0) }
     // Live rows age behind the demo, including the tick that returns to live captions.
-    if elapsed != nil { captions.expireBehindPreview(at: now) }
+    if elapsed != nil {
+      cardFeed.state.expireBehindPreview(at: now)
+      micFeed.state.expireBehindPreview(at: now)
+    }
     if let elapsed, elapsed >= CaptionPreview.duration { previewStartedAt = nil }
     let preferences = model.preferences.captions
-    if let transcript {
-      lastTranscript = transcript
-      var retained = Set(transcript.map(\.id))
-      if let pending = model.localCaptions.pendingSpeech ?? listening { retained.insert(pending.id) }
-      retiredLineIDs.formIntersection(retained)
-    }
-    let recheck = identityRevision != model.voices.captionIdentityRevision
-    identityRevision = model.voices.captionIdentityRevision
-    let rows = transcript != nil || recheck ? desktopRows() : nil
-    let liveEnabled = preferences.enabled && snoozedUntil == nil && model.localCaptions.phase != .disabled
-    if let pending = model.localCaptions.pendingSpeech {
-      listening = pending
-    } else if let current = listening {
-      // Keep the listening cue until the stable phrase reaches the desktop.
-      let receiving = model.localCaptions.lastAudioAt.map { now.timeIntervalSince($0) < 1.5 } ?? false
-      if !receiving || !model.localCaptions.isAwaitingFinal(current.id) || captions.hasPublishedWords(for: current.id) {
-        listening = nil
+    let compare = model.preferences.useMacMicrophone && preferences.enabled
+    let switched = comparing != compare
+    if switched {
+      comparing = compare
+      micFeed = DesktopCaptionFeed()
+      // A bubble already published from the cloud must never be relabelled as local.
+      if model.preferences.cloudEnabled && model.preferences.realtime {
+        cardFeed = DesktopCaptionFeed()
+        cardFeed.receive(model.localCaptions.lines.filter(\.isFinal), pending: nil)
+        cardFeed.retireTranscript()
       }
     }
-    let pending = listening.flatMap { retiredLineIDs.contains($0.id) ? nil : $0 }
+    let cardTranscript = transcript ?? (switched ? (compare ? model.localCaptions.lines : model.captionSelection.lines) : nil)
+    if let cardTranscript { cardFeed.receive(cardTranscript, pending: model.localCaptions.pendingSpeech) }
+    if compare, let microphoneTranscript { micFeed.receive(microphoneTranscript, pending: model.microphone.preview.pendingSpeech) }
+    let recheck = identityRevision != model.voices.captionIdentityRevision
+    identityRevision = model.voices.captionIdentityRevision
+    let rows = cardTranscript != nil || recheck ? desktopRows() : nil
+    let micRows = compare && microphoneTranscript != nil ? micFeed.rows(for: micFeed.transcript) : nil
+    let liveEnabled = preferences.enabled && snoozedUntil == nil
+    let cardEnabled = liveEnabled && model.localCaptions.phase != .disabled
+    let micEnabled = liveEnabled && compare && model.microphone.preview.phase != .disabled
+    let pending = cardFeed.pending(from: model.localCaptions, now: now)
+    let micPending = compare ? micFeed.pending(from: model.microphone.preview, now: now) : nil
     let needsDisplay = previewStartedAt != nil
-      || (liveEnabled && (pending != nil || rows?.isEmpty == false || !captions.items.isEmpty))
+      || (cardEnabled && (pending != nil || rows?.isEmpty == false || !cardFeed.state.items.isEmpty))
+      || (micEnabled && (micPending != nil || micRows?.isEmpty == false || !micFeed.state.items.isEmpty))
     let screen = needsDisplay && !suppressed ? selectedScreen(preferred: preferences.displayID) : nil
     let allowedSpace = !suppressed && (!needsDisplay || preferences.showInFullScreen
       || screen.map { !isFullScreen(on: $0, at: now) } == true)
     let previewing = previewStartedAt != nil && allowedSpace
-    let canPresent = allowedSpace && liveEnabled
-    if !liveEnabled || suppressed { retiredLineIDs.formUnion(lastTranscript.map(\.id)) }
-    if !canPresent, let pending { retiredLineIDs.insert(pending.id) }
-    if let rows {
-      captions.update(rows: rows, canPresent: canPresent, now: now)
-    } else {
-      captions.refresh(canPresent: canPresent, now: now)
-    }
-    var content =
-      previewing
-      ? CaptionPreview.items(at: elapsed ?? 0, startedAt: previewStartedAt ?? now)
+    var content = cardFeed.items(rows: rows, pending: pending, enabled: cardEnabled, allowedSpace: allowedSpace,
+                                 suppressed: suppressed, now: now)
+    let micContent = micFeed.items(rows: micRows, pending: micPending, enabled: micEnabled, allowedSpace: allowedSpace,
+                                   suppressed: suppressed, now: now)
+    if previewing {
+      content = CaptionPreview.items(at: elapsed ?? 0, startedAt: previewStartedAt ?? now)
         .filter { !dismissedPreviewIDs.contains($0.id) }
-      : captions.items
+    }
     if !previewing {
       for index in content.indices {
+        content[index].inputLabel = compare ? .card : nil
         guard let id = content[index].sourceLineID, let line = displayLines[id] else { continue }
         let evidence = model.voices.usableVoiceID(for: line)
         let speaker = model.voices.captionSpeaker(lineID: line.id, evidenceID: evidence)
@@ -243,28 +254,30 @@ struct CaptionDisplay: Identifiable, Equatable {
         content[index].identityControls = speaker.controls
       }
     }
-    if !previewing, canPresent, let pending, !captions.hasPublishedWords(for: pending.id) {
-      if content.count == DesktopCaptionState.maximumVisible {
-        captions.dismiss(id: content.removeFirst().id)
+    if !previewing, !micContent.isEmpty {
+      content += micContent.map { item in
+        var bubble = item
+        bubble.inputLabel = .microphone
+        return bubble
       }
-      content.append(DesktopCaption(id: pending.id, text: "", isFinal: false, receivedAt: pending.startedAt,
-                                    isSoundFeedback: true))
+      content.sort { ($0.receivedAt ?? .distantPast) < ($1.receivedAt ?? .distantPast) }
     }
     render(
       content, username: previewing ? model.preferences.captions.resolvedUsername() : VoiceLabel.unknown,
       on: screen,
-      preview: previewing, immediately: !allowedSpace || transcript?.isEmpty == true, pointer: pointer, animateStack: animateStack)
+      preview: previewing, immediately: !allowedSpace || transcript?.isEmpty == true || microphoneTranscript?.isEmpty == true,
+      pointer: pointer, animateStack: animateStack)
     updateActions(for: content, pointer: pointer)
   }
 
   private func desktopRows() -> [DesktopCaption] {
     guard let model else { return [] }
     displayLines.removeAll(keepingCapacity: true)
-    let lines = lastTranscript.map(model.voices.presentationLine)
-    for line in lines where !retiredLineIDs.contains(line.id) {
+    let lines = cardFeed.transcript.map(model.voices.presentationLine)
+    for line in lines where !cardFeed.retired.contains(line.id) {
       displayLines[line.id] = line
     }
-    return captions.rows(for: lines, retired: retiredLineIDs, speakersDiffer: { previous, line in
+    return cardFeed.rows(for: lines) { previous, line in
       let voices = model.voices
       if !LiveLine.containsSpeech(previous.text), line.bubblePhrase?.carriedText.isEmpty == false { return false }
       let older = voices.captionSpeaker(lineID: previous.id, evidenceID: previous.bubbleVoiceID).label
@@ -276,13 +289,7 @@ struct CaptionDisplay: Identifiable, Equatable {
       guard voices.hasLiveVoice(previous.bubbleVoiceID), voices.hasLiveVoice(line.bubbleVoiceID) else { return false }
       // Words carried across an ASR cut refer to the same audio even when the window IDs change.
       return line.bubblePhrase?.carriedText.isEmpty != false && previous.bubbleVoiceID != line.bubbleVoiceID
-    }, readable: { line, published in
-      if line.isFinal, line.textSource == .local, line.bubblePhrase?.continuesPrevious != true,
-         line.captionText.hasPrefix(published) {
-        return line.captionText
-      }
-      return line.bubblePhrase?.text ?? line.stableCloudText ?? line.text
-    })
+    }
   }
 
   private func clearVoiceActions() {
@@ -448,10 +455,10 @@ struct CaptionDisplay: Identifiable, Equatable {
       hide(immediately: immediately)
       return
     }
-    let frame = CaptionPlacement.frame(in: screen.visibleFrame)
+    let frame = CaptionPlacement.frame(in: screen.visibleFrame, comparing: comparing && !preview)
     if panel == nil {
       let feed = CaptionFeedView(
-        presentation: presentation, meter: model?.audioMeter,
+        presentation: presentation, meter: model?.audioMeter, micMeter: model?.microphone.meter,
         correct: { [weak self] caption, action in self?.apply(action, to: caption) },
         dismiss: { [weak self] id in self?.dismissCaption(id: id) })
       panel = CaptionPanel(frame: frame, feed: feed)

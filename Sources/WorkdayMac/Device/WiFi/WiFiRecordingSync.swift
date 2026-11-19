@@ -7,16 +7,33 @@ import WorkdayCore
 @MainActor final class WiFiRecordingSync: ObservableObject {
   enum Phase {
     case idle, preparing, checking, hotspot, joining, permission, listing, downloading, restoring,
-      archiving
+      archiving, cleaning
   }
   @Published private(set) var phase = Phase.idle
   @Published private(set) var message = "同步时 Mac 会临时连接录音卡热点。"
   @Published private(set) var result = ""
   @Published private(set) var pending: Int?
   @Published private(set) var failedImports = 0
+  @Published private(set) var pendingCleanup = 0
+  @Published private(set) var transferProgress: TransferProgress?
+  @Published private(set) var deviceInventory: CardRecordingCount?
+  @Published private(set) var outcome = DeviceSyncOutcome()
+  private var sceneTransfer: DeviceSyncTransfer?
+  var currentTransfer: DeviceSyncTransfer? {
+    if let sceneTransfer { return sceneTransfer }
+    guard phase == .downloading, let batch, let file = batch.current else { return nil }
+    return .init(name: file.name, position: batch.completed + 1, count: batch.total,
+                 progress: transferProgress)
+  }
+  var deviceID: String? { device.isEmpty ? nil : device }
+  var cleanupEnabled = false {
+    didSet {
+      if !cleanupEnabled && phase == .cleaning { cancel() }
+    }
+  }
   var busy: Bool { phase != .idle }
   var connectedDeviceID: String? {
-    guard phase == .listing || phase == .downloading, transfer.connected else { return nil }
+    guard phase == .listing || phase == .downloading, transfer.connected || sceneTransfer != nil else { return nil }
     return device
   }
   var usingNetwork: Bool {
@@ -32,11 +49,19 @@ import WorkdayCore
   private let wifi: any WiFiHotspotJoining
   private let connectTCP: (TransferClient, String, String) -> Void
   private let transfer: TransferClient
+  private let cleanup: WiFiCardCleanup
   private var batch: SyncBatch?
+  private var meter: TransferMeter?
+  private var inventoryKeys = Set<String>()
+  private var downloadedKeys = Set<String>()
   private var generation = UUID()
   private var device = ""
   private var timeout: Task<Void, Never>?
   private var verified = Set<String>()
+  private var cleanupRequested = false
+  private var unsupportedCleanupCount = 0
+  // Only a full read in this sync can authorize deletion. A resumed file can still be archived.
+  private var checkedDownloads: [String: RecordingEntry] = [:]
   private var receivedSocketReady = false
   private var requestedBluetoothRelease = false
   private var joinedOrAttempted = false
@@ -52,24 +77,60 @@ import WorkdayCore
     self.card = card
     self.wifi = wifi
     self.connectTCP = connectTCP
+    cleanup = WiFiCardCleanup(card: card, store: store)
     transfer = TransferClient(root: store.wifiInbox)
-    transfer.onConnected = { [weak self] in self?.releaseBluetoothIfReady() }
+    transfer.onConnected = { [weak self] in
+      self?.objectWillChange.send()
+      self?.releaseBluetoothIfReady()
+    }
     transfer.onFiles = { [weak self] in self?.filesListed($0) }
+    transfer.onPartialList = { [weak self] count in
+      guard let self, self.phase == .listing else { return }
+      let inventory = CardRecordingCount(discovered: count)
+      if self.deviceInventory != inventory { self.deviceInventory = inventory }
+    }
+    transfer.onDownloadStart = { [weak self] offset, total in
+      guard let self, self.phase == .downloading else { return }
+      let now = ProcessInfo.processInfo.systemUptime
+      let copied = Int64(offset)
+      let size = Int64(total)
+      self.meter = TransferMeter(total: size, initialBytes: copied, at: now)
+      self.transferProgress = .init(phase: .copying, copied: copied, total: size,
+                                    bytesPerSecond: nil, uptime: now)
+    }
     transfer.onDownloaded = { [weak self] in self?.downloaded($0) }
     transfer.onFailure = { [weak self] in self?.finish($0) }
     transfer.onProgress = { [weak self] received, total in
       guard let self, self.phase == .downloading, let batch = self.batch else { return }
       let percent = total > 0 ? Int(100 * received / total) : 0
-      self.message = "正在下载 \(batch.completed + 1)/\(batch.total) · \(percent)%"
+      let message = "正在下载 \(batch.completed + 1)/\(batch.total) · \(percent)%"
+      if self.message != message { self.message = message }
+      if let sample = self.meter?.update(Int64(received), at: ProcessInfo.processInfo.systemUptime) {
+        self.transferProgress = sample
+      }
     }
     wifi.permissionChanged = { [weak self] allowed in
       guard let self, self.phase == .permission else { return }
       if allowed { self.checkState() } else { self.finish("未获热点识别权限，可在系统设置中允许工作留声访问定位后重试。") }
     }
   }
+  func bluetoothRecordingCount(for id: String, onListed: (Int) -> Void = { _ in }) async throws -> CardRecordingCount {
+    guard !busy, card.preferredKind == .wifi, card.boundID == id else { throw CancellationError() }
+    let files = try await card.readWiFiFileList(for: id, duringSync: false)
+    try Task.checkCancellation()
+    guard !busy, card.boundID == id else { throw CancellationError() }
+    let keys = Set(files.map { DownloadStore.key(device: id, file: $0) })
+    onListed(keys.count)
+    let verified = try await store.verifiedWiFiKeys(matching: keys)
+    try Task.checkCancellation()
+    guard !busy, card.boundID == id else { throw CancellationError() }
+    return CardRecordingCount(discovered: keys.count, complete: true, pending: keys.subtracting(verified).count)
+  }
+
   func attach() {
     card.onWiFiState = { [weak self] in self?.receivedState($0) }
     card.onHotspot = { [weak self] in self?.join($0) }
+    card.onWiFiFilePacket = { [weak self] packet in self?.cleanup.accept(packet) }
     card.onSocket = { [weak self] in
       guard let self, self.usingNetwork else { return }
       self.receivedSocketReady = true
@@ -84,13 +145,34 @@ import WorkdayCore
         self.card.holdReconnect = true
       case .checking, .hotspot, .joining, .permission:
         self.finish("录音卡蓝牙连接中断，请重新同步。")
+      case .cleaning:
+        self.cleanup.interrupt(WorkdayError.invalid("清理时蓝牙断开，请重新同步"))
       default: break
       }
     }
   }
+
+  /// Stage a consistent coordinator state for the isolated native window capture.
+  func setSceneState(id: String, transfer: DeviceSyncTransfer? = nil,
+                     inventory: CardRecordingCount? = nil, outcome: DeviceSyncOutcome = .init(),
+                     pendingCleanup: Int = 0) {
+    guard SceneWindowCapture.isRunning, card.boundID == id else { return }
+    device = id
+    sceneTransfer = transfer
+    deviceInventory = inventory
+    self.outcome = outcome
+    self.pendingCleanup = pendingCleanup
+    set(transfer == nil ? .idle : .downloading,
+        transfer == nil ? "同步时 Mac 会临时连接录音卡热点。" : "正在同步录音")
+  }
   func clearDeviceResult() {
     guard !busy else { return }
     pending = nil
+    pendingCleanup = 0
+    unsupportedCleanupCount = 0
+    outcome = DeviceSyncOutcome()
+    clearInventory()
+    device = ""
     result = ""
     message = "同步时 Mac 会临时连接录音卡热点。"
   }
@@ -101,6 +183,13 @@ import WorkdayCore
     receivedSocketReady = false
     requestedBluetoothRelease = false
     joinedOrAttempted = false
+    cleanupRequested = cleanupEnabled
+    checkedDownloads.removeAll()
+    downloadedKeys.removeAll()
+    clearInventory()
+    outcome = DeviceSyncOutcome()
+    pendingCleanup = 0
+    unsupportedCleanupCount = 0
     result = ""
     batch = nil
     card.wifiBusy = true
@@ -122,6 +211,10 @@ import WorkdayCore
     card.queryWiFiState()
   }
   func receivedState(_ raw: UInt8) {
+    if phase == .cleaning, card.boundID == device {
+      cleanup.accept(Packet(5, [raw]))
+      return
+    }
     guard phase == .checking, card.boundID == device else { return }
     guard raw == 0 else {
       finish("请先在卡上结束并保存录音，再同步。")
@@ -157,14 +250,30 @@ import WorkdayCore
   private func filesListed(_ files: [RecordingEntry]) {
     guard phase == .listing else { return }
     let inbox = DownloadStore(root: store.wifiInbox)
+    inventoryKeys = Set(files.map { DownloadStore.key(device: device, file: $0) })
+    updateInventory()
     let existing = files.filter { item in
-      let url = inbox.url(device: device, file: item, partial: false)
-      let key = url.deletingLastPathComponent().lastPathComponent + "/" + url.lastPathComponent
-      return verified.contains(key) || inbox.completed(device: device, file: item) != nil
+      let verifyForCleanup = cleanupRequested && item.supportsCardCleanup
+      return inbox.completed(device: device, file: item) != nil
+        || (!verifyForCleanup && verified.contains(DownloadStore.key(device: device, file: item)))
+    }
+    if cleanupRequested {
+      pendingCleanup = files.filter(\.supportsCardCleanup).count
+      unsupportedCleanupCount = files.count - pendingCleanup
     }
     batch = SyncBatch(files: files, existing: existing)
     pending = batch?.total
     next()
+  }
+  private func updateInventory() {
+    let inventory = CardRecordingCount(discovered: inventoryKeys.count, complete: true,
+                                      pending: inventoryKeys.subtracting(verified).count)
+    if deviceInventory != inventory { deviceInventory = inventory }
+  }
+
+  private func clearInventory() {
+    inventoryKeys.removeAll()
+    deviceInventory = nil
   }
   private func next() {
     guard var batch else { return }
@@ -176,23 +285,34 @@ import WorkdayCore
           finish("下载通道已断开，可重新同步。")
           return
         }
+        transferProgress = nil
+        meter = nil
         set(.downloading, "正在下载 \(batch.completed + 1)/\(batch.total)")
-        transfer.download(item)
+        let recheckingArchive = cleanupRequested
+          && verified.contains(DownloadStore.key(device: device, file: item))
+        transfer.download(item, resume: !recheckingArchive)
       } else {
-        finish("新增 \(batch.completed) 段，已有 \(batch.skipped) 段。")
+        let summary = cleanupRequested
+          ? "已完整读取 \(batch.completed) 段，跳过 \(batch.skipped) 段。"
+          : "新增 \(batch.completed) 段，已有 \(batch.skipped) 段。"
+        finish(summary, completedBatch: true)
       }
     } catch { finish(error.localizedDescription) }
   }
   private func downloaded(_ url: URL) {
     guard phase == .downloading, var batch, let item = batch.current else { return }
-    let expected = DownloadStore(root: store.wifiInbox).url(
-      device: device, file: item, partial: false)
+    let inbox = DownloadStore(root: store.wifiInbox)
+    let expected = inbox.url(device: device, file: item, partial: false)
     guard url == expected else {
       finish("收到的录音与本次下载不符")
       return
     }
     do {
       try batch.finish(item)
+      if meter != nil { downloadedKeys.insert(DownloadStore.key(device: device, file: item)) }
+      if cleanupRequested, item.supportsCardCleanup, transfer.downloadedFromStart {
+        checkedDownloads[DownloadStore.key(device: device, file: item)] = item
+      }
       self.batch = batch
       pending = batch.total - batch.completed
       next()
@@ -202,6 +322,10 @@ import WorkdayCore
     timeout?.cancel()
     timeout = nil
     self.phase = phase
+    if phase != .downloading {
+      transferProgress = nil
+      meter = nil
+    }
     self.message = message
     guard let seconds else { return }
     timeout = Task {
@@ -211,21 +335,31 @@ import WorkdayCore
   }
   func cancel() {
     guard busy, phase != .restoring, phase != .archiving else { return }
+    if phase == .cleaning {
+      archiveTask?.cancel()
+      cleanup.interrupt(CancellationError())
+      return
+    }
     finish("已取消同步，已下载原件和断点保留。")
   }
-  private func finish(_ outcome: String) {
-    guard busy, phase != .restoring, phase != .archiving else { return }
+  private func finish(_ detail: String, completedBatch: Bool = false) {
+    guard busy, phase != .restoring, phase != .archiving, phase != .cleaning else { return }
     let shouldRestore = joinedOrAttempted
+    if !completedBatch {
+      pendingCleanup = 0
+      outcome.notice = detail
+    }
     generation = UUID()
     wifi.cancel()
-    set(.restoring, "正在结束连接并恢复网络…")
-    result = outcome
+    set(.restoring, shouldRestore ? "正在恢复 Wi-Fi…" : "正在结束同步…")
+    result = detail
     let complete: (String) -> Void = { [weak self] note in
       guard let self, self.phase == .restoring else { return }
       self.result += note.isEmpty ? "" : " " + note
+      if !note.isEmpty { self.outcome.network = note }
       if shouldRestore { self.checkNetworkRestoration() }
       self.card.holdReconnect = false
-      self.beginArchive()
+      self.beginArchive(completedBatch: completedBatch, cleanAfter: completedBatch && self.cleanupRequested)
     }
     let restore = { [weak self] in
       guard let self else { return }
@@ -241,23 +375,47 @@ import WorkdayCore
     }
   }
   /// Also runs on library open so a crash after END or a codec failure needs no card to retry.
-  func retryLocal() {
+  func retryLocal(for deviceID: String? = nil) {
     guard !busy else { return }
     result = ""
-    beginArchive()
+    if let deviceID, deviceID != self.deviceID {
+      clearDeviceResult()
+      device = deviceID
+    } else {
+      outcome.notice = nil
+    }
+    checkedDownloads.removeAll()
+    downloadedKeys.removeAll()
+    beginArchive(localRetry: true)
   }
-  private func beginArchive() {
+  private func beginArchive(completedBatch: Bool = false, cleanAfter: Bool = false,
+                            localRetry: Bool = false) {
     set(.archiving, "正在检查已下载的录音…")
     archiveTask = Task {
+      let retryDirectory = localRetry ? deviceID.map(DownloadStore.directoryName(for:)) : nil
       var count = 0
+      var saved = 0
       var failures = 0
       var lastError: String?
+      var candidates: [WiFiCardCleanup.Candidate] = []
       do {
         for url in try await store.pendingWiFiFiles() {
           if Task.isCancelled { break }
           do {
-            _ = try await store.archiveWiFiFile(url)
+            let receipt = try await store.archiveWiFiFileWithOutcome(url)
+            let archive = receipt.recording
             count += 1
+            if let key = archive.wifiOriginal?.key {
+              verified.insert(key)
+              if inventoryKeys.contains(key) { updateInventory() }
+              if receipt.saved && (downloadedKeys.contains(key)
+                || archive.wifiOriginal?.device == retryDirectory) {
+                saved += 1
+              }
+              if cleanAfter, let item = checkedDownloads[key] {
+                candidates.append((item, archive))
+              }
+            }
             try FileManager.default.removeItem(at: url)
           } catch {
             failures += 1
@@ -269,11 +427,58 @@ import WorkdayCore
         lastError = error.localizedDescription
       }
       failedImports = failures
-      if count > 0 { result += " \(count) 段已加入录音库。" }
-      if let lastError { result += " \(failures) 项待重试：\(lastError)" }
+      if saved > 0 || completedBatch { outcome.saved = (outcome.saved ?? 0) + saved }
+      if !localRetry && !cleanupRequested && (saved > 0 || !inventoryKeys.isEmpty) {
+        outcome.copies = "卡内副本已保留。"
+      }
+      if count > 0 { result += " 已确认 \(count) 段本地归档。" }
+      if let lastError {
+        result += " \(failures) 项待重试：\(lastError)"
+        outcome.addNotice("\(failures) 项本地归档或下载暂存文件清理待重试。")
+      }
+      checkedDownloads.removeAll()
+      downloadedKeys.removeAll()
+      if cleanAfter && cleanupRequested && cleanupEnabled && !candidates.isEmpty {
+        await cleanCard(candidates)
+      } else if cleanAfter && pendingCleanup > 0 && cleanupEnabled {
+        result += " \(pendingCleanup) 段卡内副本待完整核对，可重新同步。"
+        outcome.addCopies("\(pendingCleanup) 段卡内副本待核对，可重新同步。")
+      } else if !localRetry && cleanupRequested && saved > 0 {
+        outcome.addCopies("卡内副本已保留。")
+      }
+      if cleanAfter && cleanupEnabled && unsupportedCleanupCount > 0 {
+        result += " \(unsupportedCleanupCount) 段录音的卡内文件名不适用于自动清理，已保留。"
+        outcome.addCopies("\(unsupportedCleanupCount) 段卡内副本不支持自动清理，已保留。")
+      }
       card.wifiBusy = false
+      clearInventory()
       set(.idle, "同步时 Mac 会临时连接录音卡热点。")
       if count > 0 || !device.isEmpty { await onArchiveChange() }
+    }
+  }
+  private func cleanCard(_ candidates: [WiFiCardCleanup.Candidate]) async {
+    let initialPending = pendingCleanup
+    set(.cleaning, "原件已保存，正在核对卡内副本…")
+    clearInventory()
+    do {
+      try await cleanup.remove(candidates, from: device) { confirmed in
+        pendingCleanup = max(0, initialPending - confirmed)
+        message = "正在清理卡内副本 · 已确认 \(confirmed)/\(candidates.count)"
+      }
+    } catch is CancellationError {
+      result += " 已停止清理。"
+      outcome.addCopies("已停止清理。")
+    } catch {
+      result += " 清理暂停：\(error.localizedDescription)。"
+      if pendingCleanup == 0 || !cleanupEnabled { outcome.addCopies("卡内副本待清理。") }
+    }
+    if cleanup.removed > 0 {
+      result += " 已删除 \(cleanup.removed) 段卡内副本。"
+      outcome.addCopies("已删除 \(cleanup.removed) 段卡内副本。")
+    }
+    if cleanupEnabled && pendingCleanup > 0 {
+      result += " \(pendingCleanup) 段卡内副本待清理，可重新同步。"
+      outcome.addCopies("\(pendingCleanup) 段副本待清理，可重新同步。")
     }
   }
   private func checkNetworkRestoration() {
@@ -296,6 +501,7 @@ import WorkdayCore
     }
   }
   func shutdown() async {
+    cleanupRequested = false
     if busy { cancel() }
     while phase == .restoring { try? await Task.sleep(nanoseconds: 50_000_000) }
     await archiveTask?.value

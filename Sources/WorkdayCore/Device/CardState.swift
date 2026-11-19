@@ -1,5 +1,6 @@
 import Foundation
 import QS668Core
+import struct WiFiRecorderCore.WiFiCardStatus
 
 public typealias CardQuery = RecorderQuery
 
@@ -26,7 +27,8 @@ public struct CardState {
   private var starting = false
   private var lastHardwareEvent = Date.distantPast
   public init() {}
-  public mutating func updateWiFi(raw: UInt8, battery: Int?, freeStorageFraction: Double? = nil, at date: Date = Date()) {
+  public mutating func updateWiFi(raw: UInt8, battery: Int?, freeStorageFraction: Double? = nil,
+                                  storage: WiFiCardStatus.Storage? = nil, at date: Date = Date()) {
     // FW925 的状态应答只有 0 能确认空闲。暂停由成功的按键应答确认，非零轮询保留暂停状态。
     let next: Phase
     switch raw {
@@ -39,7 +41,9 @@ public struct CardState {
     if next == .idle { filename = nil }
     confirmedAt = date
     self.battery = battery
-    self.freeStorageFraction = freeStorageFraction
+    totalBytes = storage?.totalBytes
+    freeBytes = storage?.freeBytes
+    self.freeStorageFraction = storage?.freeFraction ?? freeStorageFraction
     batteryAt = date
   }
   public mutating func updateWiFi(event: WiFiRecordingEvent, filename: String?, at date: Date = Date()) {

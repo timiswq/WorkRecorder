@@ -36,6 +36,7 @@ struct USBScan {
   // Only the selected volume reaches connection, inventory and sync consumers.
   @Published var volumes: [USBVolume] = []
   @Published private(set) var diskSpace: USBVolume.Space?
+  @Published private(set) var inventory: DeviceInventory?
   @Published var issue: String?
   var onScan: ((USBScan) -> Void)?
   var onConnection: ((Bool) -> Void)?
@@ -94,6 +95,7 @@ struct USBScan {
     candidates.removeAll()
     issue = nil
     diskSpace = nil
+    inventory = nil
     volumes = active
     onScan?(USBScan(files: [], ready: [], inventories: []))
     onConnection?(!active.isEmpty)
@@ -122,6 +124,7 @@ struct USBScan {
     let inventory = DeviceInventory(sourceID: volume.id, entries: read.files.map {
       InventoryEntry(name: $0.name, duration: nil, bytes: $0.size, isOpusOnly: !$0.supported)
     }, observedAt: now, complete: read.errors.isEmpty)
+    self.inventory = inventory
     onScan?(USBScan(files: read.files, ready: ready, inventories: [inventory]))
   }
   nonisolated private static func discover() -> [USBVolume] {

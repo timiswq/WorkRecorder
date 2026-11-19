@@ -17,6 +17,10 @@ struct DesktopCaptionSettings: View {
           Toggle("启用本机字幕与桌面气泡", isOn: $model.preferences.captions.enabled).labelsHidden()
         }.padding(16)
         Divider()
+        MicrophoneCaptionSetting(enabled: $model.preferences.useMacMicrophone, microphone: model.microphone,
+                                 preview: model.microphone.preview)
+          .disabled(!model.preferences.captions.enabled)
+        Divider()
         HStack {
           VStack(alignment: .leading, spacing: 5) {
             Text("我的用户名")
@@ -94,5 +98,33 @@ struct DesktopCaptionSettings: View {
       .font(.system(size: 12)).background(Palette.surface, in: RoundedRectangle(cornerRadius: 9))
       .overlay(RoundedRectangle(cornerRadius: 9).stroke(Palette.line))
     }
+  }
+}
+
+private struct MicrophoneCaptionSetting: View {
+  @Binding var enabled: Bool
+  @ObservedObject var microphone: MicrophoneCaptions
+  @ObservedObject var preview: LivePreview
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack {
+        VStack(alignment: .leading, spacing: 5) {
+          Text("使用 Mac 麦克风")
+          Text("两路分别显示本机识别气泡。麦克风音频和字幕仅用于实时对比。")
+            .font(.system(size: 10)).foregroundStyle(Palette.muted)
+        }
+        Spacer()
+        Toggle("使用 Mac 麦克风", isOn: $enabled).labelsHidden()
+          .accessibilityIdentifier("use-mac-microphone")
+      }
+      if enabled, let message = microphone.failure ?? (preview.canRetry ? preview.status : nil) {
+        HStack {
+          Text(message).foregroundStyle(Palette.amber)
+          Button("重试麦克风") { microphone.retry() }
+        }.font(.system(size: 11))
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading).padding(16)
   }
 }

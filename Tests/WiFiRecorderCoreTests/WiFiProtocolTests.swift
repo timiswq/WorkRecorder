@@ -3,10 +3,14 @@ import XCTest
 @testable import WiFiRecorderCore
 
 final class WiFiProtocolTests: XCTestCase {
-  func testStorageFractionFromCapturedStatusKeepsCapacityUnitIndependent() throws {
+  func testCapturedStorageUsesDecimalMegabytesAndRejectsInvalidReadings() throws {
     var parser = BLEParser()
     let status = try XCTUnwrap(captures().flatMap { parser.feed($0) }.first { $0.key == 5 })
     let report = try XCTUnwrap(WiFiCardStatus(status.payload))
+    let storage = try XCTUnwrap(report.storage)
+    XCTAssertEqual(storage.totalBytes, 59_628_000_000)
+    XCTAssertEqual(storage.freeBytes, 59_627_000_000)
+    XCTAssertEqual(storage.totalBytes - storage.freeBytes, 1_000_000)
     XCTAssertEqual(try XCTUnwrap(report.freeStorageFraction), 59_627.0 / 59_628, accuracy: 0.0000001)
     XCTAssertEqual(report.battery, 60)
     XCTAssertEqual(report.recordingCode, 1)
@@ -14,9 +18,16 @@ final class WiFiProtocolTests: XCTestCase {
     for (total, free) in [(0, 0), (10, 11)] {
       let bytes = Wire.beBytes(UInt64(total)) + Wire.beBytes(UInt64(free)) + [0, 65, 1]
       let invalidSpace = try XCTUnwrap(WiFiCardStatus(bytes))
+      XCTAssertNil(invalidSpace.storage)
       XCTAssertNil(invalidSpace.freeStorageFraction)
       XCTAssertEqual(invalidSpace.battery, 65)
       XCTAssertEqual(invalidSpace.recordingCode, 1)
+    }
+    for free: UInt64 in [0, UInt64(UInt32.max)] {
+      let bytes = Wire.beBytes(UInt64(UInt32.max)) + Wire.beBytes(free) + [0, 65, 0]
+      let value = try XCTUnwrap(WiFiCardStatus(bytes)?.storage)
+      XCTAssertEqual(value.totalBytes, Int64(UInt32.max) * 1_000_000)
+      XCTAssertEqual(value.freeBytes, Int64(free) * 1_000_000)
     }
   }
 

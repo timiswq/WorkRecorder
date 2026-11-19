@@ -21,6 +21,11 @@ enum CaptionIdentityControls: String {
   case reject = "不是我"
 }
 
+enum CaptionInputLabel: String {
+  case card = "录音卡"
+  case microphone = "Mac 麦克风"
+}
+
 struct DesktopCaption: Identifiable, Equatable {
   let id: String
   var text: String
@@ -33,6 +38,7 @@ struct DesktopCaption: Identifiable, Equatable {
   var voiceID: String? = nil
   var identityControls: CaptionIdentityControls? = nil
   var receivedAt: Date? = nil
+  var inputLabel: CaptionInputLabel?
   var isSoundFeedback = false
   var phrases: [CaptionPhrase] = []
   var reservesReadingWidth = false

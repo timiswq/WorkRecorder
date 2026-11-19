@@ -42,6 +42,22 @@ final class ArchiveTests: XCTestCase {
     XCTAssertNil(samples.last?.bytesPerSecond)
   }
 
+  func testRecentTransferRateUsesNewBytesAfterResumeAndUpdatesOnceASecond() throws {
+    var meter = TransferMeter(total: 200_000_000, initialBytes: 80_000_000, at: 10)
+    let initial = try XCTUnwrap(meter.update(80_400_000, at: 10.5))
+    XCTAssertEqual(initial.copied, 80_400_000)
+    XCTAssertNil(initial.recentBytesPerSecond)
+    let first = try XCTUnwrap(meter.update(81_000_000, at: 11))
+    XCTAssertEqual(first.recentBytesPerSecond, 1_000_000)
+    let mid = try XCTUnwrap(meter.update(83_000_000, at: 11.5))
+    XCTAssertEqual(mid.recentBytesPerSecond, first.recentBytesPerSecond)
+    let second = try XCTUnwrap(meter.update(85_000_000, at: 12))
+    XCTAssertEqual(second.recentBytesPerSecond, 2_500_000)
+    let third = try XCTUnwrap(meter.update(89_000_000, at: 13))
+    XCTAssertEqual(third.recentBytesPerSecond, 4_000_000)
+    XCTAssertNil(meter.update(89_000_000, at: 14))
+  }
+
   func fixture(
     _ name: String = "note20261109-083000.wav", samples: Int = 32000, value: Int16 = 1200
   ) throws -> URL {

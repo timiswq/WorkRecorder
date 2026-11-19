@@ -6,13 +6,13 @@ A native macOS app for QS668 / CB08 and B3085 (FW925) recorder cards. Keep origi
 
 Current development version: **0.7.0 (20260006)**. The baseline is tagged `baseline-2026-11-17`; development continues on `main`. This is an actively developed project. Automated tests do not establish real-device reliability, cloud availability, or speaker recognition accuracy in real meetings.
 
-Select the B3085 in device settings. After recording, choose **Sync recordings** to download files over the card’s Wi-Fi hotspot. The library keeps the device original and a playable WAV. Bluetooth audio in a supported format feeds the same captions and speaker recognition as the QS668 / CB08. Continuous live audio and the full sync flow still need verification on the FW925.
+Select the B3085 and open its device page while the card is idle to see how many recordings still need syncing. The app reads this list over Bluetooth. After recording, choose **Sync recordings** to download files over the card’s Wi-Fi hotspot. The library keeps the device original and a playable WAV. Bluetooth audio in a supported format feeds the same captions and speaker recognition as the QS668 / CB08.
 
 ## Features
 
-- USB archival with file-size and SHA-256 verification before configured cleanup of card copies.
+- USB and Wi-Fi sync show progress and recent transfer speed for the current recording. Both use the same setting to clean up verified card copies after archival. Turn it off before syncing to keep the originals on the card.
 - Apple on-device captions append stable phrases as you speak, including speech from unidentified speakers. ESP can supply live transcription or review each final sentence. Caption history keeps the latest text and sentence replay for 24 hours.
-- Dismissible desktop captions, a menu bar status panel, and a Dock icon that changes with recorder state and shows the pending-sync count.
+- Desktop captions can show the recorder and the Mac’s built-in microphone as separate, locally transcribed inputs. Microphone audio and captions stay in memory. The menu bar and Dock show recorder status and the pending-sync count.
 - Live speaker matching with local CAM++ and Silero models. Confirm or correct a speaker, review samples, or reset the sample library in Settings.
 - Daily overviews and transcripts grouped by morning, afternoon, and evening. Follow processing progress or replay recordings from the time-of-day scrubber.
 

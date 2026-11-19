@@ -25,17 +25,29 @@ public struct Packet {
   }
 }
 
-/// B3085 key 5 reports total and free space in the same, undocumented unit.
+/// DOWAY 3.8.3 displays the two B3085 key 5 storage counts as decimal MB.
 public struct WiFiCardStatus {
+  public struct Storage: Equatable, Sendable {
+    public let totalBytes: Int64
+    public let freeBytes: Int64
+    public var freeFraction: Double { Double(freeBytes) / Double(totalBytes) }
+
+    public init?(totalMegabytes: UInt32, freeMegabytes: UInt32) {
+      guard totalMegabytes > 0, freeMegabytes <= totalMegabytes else { return nil }
+      totalBytes = Int64(totalMegabytes) * 1_000_000
+      freeBytes = Int64(freeMegabytes) * 1_000_000
+    }
+  }
+
   public let recordingCode: UInt8
   public let battery: Int?
-  public let freeStorageFraction: Double?
+  public let storage: Storage?
+  public var freeStorageFraction: Double? { storage?.freeFraction }
 
   public init?(_ payload: [UInt8]) {
     guard payload.count >= 11 else { return nil }
-    let total = Wire.be32(payload, 0)
-    let free = Wire.be32(payload, 4)
-    freeStorageFraction = total > 0 && free <= total ? Double(free) / Double(total) : nil
+    storage = Storage(totalMegabytes: UInt32(Wire.be32(payload, 0)),
+                      freeMegabytes: UInt32(Wire.be32(payload, 4)))
     battery = payload[9] <= 100 ? Int(payload[9]) : nil
     recordingCode = payload[10]
   }
@@ -46,6 +58,10 @@ public struct RecordingEntry: Identifiable, Equatable {
   public let size: UInt64
   public var id: String { Wire.hex(wireName) }
   public var name: String { String(decoding: wireName.prefix { $0 != 0 }, as: UTF8.self) }
+  public var supportsCardCleanup: Bool {
+    // FW925 uses a fourteen-digit name for saved recordings.
+    wireName.allSatisfy { (48...57).contains($0) }
+  }
   public init(_ payload: [UInt8]) throws {
     guard payload.count >= 19, payload[0] == 0 else {
       throw WiFiRecorderError.invalid("文件条目不足19字节")
@@ -53,6 +69,29 @@ public struct RecordingEntry: Identifiable, Equatable {
     wireName = Array(payload[1..<15])
     size = Wire.be32(payload, 15)
     guard wireName.contains(where: { $0 != 0 }) else { throw WiFiRecorderError.invalid("设备返回空文件名") }
+  }
+}
+public struct RecordingList {
+  private var entries: [String: RecordingEntry] = [:]
+
+  public init() {}
+  public var discoveredCount: Int { entries.count }
+
+  /// Both the hotspot and the Bluetooth control channel use the same list frames.
+  public mutating func accept(_ payload: [UInt8]) throws -> [RecordingEntry]? {
+    switch payload.first {
+    case 0:
+      let file = try RecordingEntry(payload)
+      if let previous = entries[file.id], previous != file {
+        throw WiFiRecorderError.invalid("同一录音在清单中的大小发生变化，请重试")
+      }
+      entries[file.id] = file
+      return nil
+    case 2:
+      return entries.values.sorted { $0.name > $1.name }
+    default:
+      throw WiFiRecorderError.invalid("录音卡未返回有效的列表结束标记")
+    }
   }
 }
 public struct HotspotCredentials {

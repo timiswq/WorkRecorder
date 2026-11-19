@@ -2,16 +2,54 @@ import Combine
 import Foundation
 import WorkdayCore
 
+struct USBRecordingRun {
+  private(set) var positions: [String] = []
+  private(set) var waiting = Set<String>()
+  private(set) var complete = false
+  var saved = 0
+  var deleted = 0
+
+  mutating func plan(_ ids: Set<String>, complete: Bool) {
+    waiting = ids.subtracting(positions)
+    self.complete = complete
+  }
+
+  mutating func begin(_ id: String, planned: Set<String>, complete: Bool) {
+    if !positions.contains(id) {
+      if waiting.isEmpty && !positions.isEmpty { self = USBRecordingRun() }
+      positions.append(id)
+    }
+    plan(planned, complete: complete)
+  }
+
+  func transfer(file: SyncFile, progress: TransferProgress?) -> DeviceSyncTransfer? {
+    guard let index = positions.firstIndex(of: file.id) else { return nil }
+    return .init(name: file.name, position: index + 1,
+                 count: complete ? positions.count + waiting.count : nil, progress: progress)
+  }
+}
+
 /// One copy at a time; new discoveries remain queued while an import awaits disk I/O.
 @MainActor final class SyncCoordinator: ObservableObject {
   @Published private(set) var ledger = SyncLedger()
   @Published private(set) var transfer: TransferProgress?
   @Published private(set) var cleaningFile: SyncFile?
   @Published private(set) var clearedBytesByVolume: [String: Int64] = [:]
+  @Published private(set) var deviceRun = USBRecordingRun()
+  private var mountGeneration = UUID()
+  private var plannedUSB = Set<String>()
+  private var completeUSBPlan = false
   private var mounted: [USBVolume] = []
+  var deviceTransfer: DeviceSyncTransfer? {
+    guard let file = activeFile, mounted.first?.id == file.sourceID else { return nil }
+    return deviceRun.transfer(file: file, progress: transfer)
+  }
   private var cleanable: [SyncFile] = []
   private var removed = Set<String>()
   private var retryCleanupAfter: [String: Date] = [:]
+  var cleanupEnabled = true {
+    didSet { if !cleanupEnabled && cleanupFailed { clearError() } }
+  }
   var cleanupFailed: Bool {
     failedFile.map { retryCleanupAfter[$0.id] != nil } ?? false
   }
@@ -31,8 +69,24 @@ import WorkdayCore
   private var stopping = false
   private var revision = 0
   private var savedRevision = -1
-  var isBusy: Bool { task != nil }
+  var isBusy: Bool { task != nil || activeFile != nil }
   init(store: ArchiveStore) { self.store = store }
+
+  /// Let the isolated native scene exercise the same status and action routing as a real copy.
+  func setSceneTransfer(_ progress: TransferProgress?, files: [SyncFile] = []) {
+    guard SceneWindowCapture.isRunning, task == nil else { return }
+    deviceRun = USBRecordingRun()
+    activeFile = nil
+    transfer = nil
+    guard let progress, files.count >= 2, files[1].sourceID == mounted.first?.id else { return }
+    let planned = Set(files.map(\.id))
+    for file in files.prefix(2) {
+      deviceRun.begin(file.id, planned: planned, complete: true)
+    }
+    transfer = progress
+    activeFile = files[1]
+  }
+
   func load() async throws {
     ledger = try await store.loadSyncLedger()
     // Repair external deletion of local copies without treating a mere cached row as success.
@@ -64,7 +118,12 @@ import WorkdayCore
     if ledger.entries != previous { revision += 1 }
     pump()
   }
-  func updateUSB(_ files: [SyncFile], stableFiles: [SyncFile], volumes: [USBVolume]) {
+  func updateUSB(_ files: [SyncFile], stableFiles: [SyncFile], volumes: [USBVolume],
+                 planned: [SyncFile]? = nil, complete: Bool = false) {
+    if mounted != volumes {
+      mountGeneration = UUID()
+      deviceRun = USBRecordingRun()
+    }
     mounted = volumes
     cleanable = stableFiles.filter { $0.path.lowercased().hasSuffix(".wav") }
     let present = Set(cleanable.map(\.id))
@@ -75,6 +134,14 @@ import WorkdayCore
     let ids = Set(ledger.entries.filter { !$0.file.sourceID.hasPrefix("usb:") }.map(\.id))
     available.formIntersection(ids)
     let eligible = files.filter { !removed.contains($0.id) }
+    let archived = Set(ledger.entries.compactMap { $0.recordingID == nil ? nil : $0.id })
+    plannedUSB = Set((planned ?? eligible).filter(\.supported).map(\.id)).subtracting(archived)
+    completeUSBPlan = complete
+    if activeFile.map({ $0.sourceID == mounted.first?.id }) == true || !deviceRun.waiting.isEmpty {
+      if deviceRun.waiting != plannedUSB.subtracting(deviceRun.positions) || deviceRun.complete != complete {
+        deviceRun.plan(plannedUSB, complete: complete)
+      }
+    }
     if !eligible.isEmpty {
       offer(eligible)
     } else if !available.isEmpty || !cleanable.isEmpty {
@@ -94,6 +161,7 @@ import WorkdayCore
     error = nil
   }
   private func nextCleanup() -> (SyncFile, USBVolume, String)? {
+    guard cleanupEnabled else { return nil }
     let now = Date()
     for file in cleanable
     where !removed.contains(file.id) && (retryCleanupAfter[file.id] ?? .distantPast) <= now {
@@ -114,6 +182,7 @@ import WorkdayCore
   }
 
   private func clean(_ file: SyncFile, on volume: USBVolume, recordingID: String) async {
+    let mount = mountGeneration
     cleaningFile = file
     defer { cleaningFile = nil }
     do {
@@ -126,6 +195,7 @@ import WorkdayCore
         revision += 1
       }
       clearedBytesByVolume[volume.id, default: 0] += bytes
+      if mount == mountGeneration && mounted.first?.id == file.sourceID { deviceRun.deleted += 1 }
       if failedFile?.id == file.id { clearError() }
     } catch {
       guard !Task.isCancelled else { return }
@@ -159,6 +229,10 @@ import WorkdayCore
           }
           activeFile = entry.file
           transfer = nil
+          let mount = mountGeneration
+          if mounted.first?.id == entry.file.sourceID {
+            deviceRun.begin(entry.id, planned: plannedUSB, complete: completeUSBPlan)
+          }
           let (updates, sink) = AsyncStream<TransferProgress>.makeStream(
             bufferingPolicy: .bufferingNewest(1))
           let observer = Task {
@@ -180,14 +254,18 @@ import WorkdayCore
             guard before.size == file.size, before.modified == file.modified else {
               throw WorkdayError.invalid("文件仍在保存，等待稳定后重新同步")
             }
-            let recording = try await store.importAudio(
+            let receipt = try await store.importAudioWithOutcome(
               source, sourceID: file.sourceID, companionName: file.companionName,
               volumeUUID: mounted.first { $0.id == file.sourceID }?.uuid,
               transfer: { sink.yield($0) })
+            let recording = receipt.recording
             if failedFile?.sourceID == file.sourceID && failedFile?.name == file.name {
               clearError()
             }
             ledger.complete(entry.id, recordingID: recording.id)
+            if receipt.saved && mount == mountGeneration && mounted.first?.id == entry.file.sourceID {
+              deviceRun.saved += 1
+            }
             completedThisRun += 1
             revision += 1
             try await store.saveSyncLedger(ledger)

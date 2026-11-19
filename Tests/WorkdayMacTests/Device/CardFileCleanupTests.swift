@@ -52,9 +52,12 @@ final class CardFileCleanupTests: XCTestCase {
     try Data("保留".utf8).write(to: unrelated)
     let restarted = SyncCoordinator(store: store)
     try await restarted.load()
-    restarted.updateUSB([], stableFiles: [], volumes: [volume])
+    restarted.cleanupEnabled = false
+    restarted.updateUSB([], stableFiles: [file], volumes: [volume])
     try await settle(restarted)
     XCTAssertTrue(FileManager.default.fileExists(atPath: wav.path))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: opus.path))
+    restarted.cleanupEnabled = true
     restarted.updateUSB([], stableFiles: [file], volumes: [volume])
     try await settle(restarted)
     XCTAssertNil(restarted.error)
@@ -166,5 +169,35 @@ final class CardFileCleanupTests: XCTestCase {
       phase: .verifying, copied: 12_000_000, total: 12_000_000,
       bytesPerSecond: nil, uptime: 13)
     XCTAssertEqual(FileTransferRow.label(for: check, at: 14), "正在校验")
+  }
+
+  func testDeviceSpeedUsesTheRecentRateAndExpiresWithoutNewBytes() {
+    let measuring = TransferProgress(phase: .copying, copied: 4_000_000, total: 12_000_000,
+                                     bytesPerSecond: 3_000_000, uptime: 10)
+    XCTAssertEqual(DeviceTransferDetails.speedLabel(measuring, at: 10.4), "测速中…")
+    let copying = TransferProgress(phase: .copying, copied: 7_000_000, total: 12_000_000,
+                                   bytesPerSecond: 3_000_000, uptime: 11,
+                                   recentBytesPerSecond: 1_000_000)
+    XCTAssertEqual(DeviceTransferDetails.speedLabel(copying, at: 11.2), deviceBytes(1_000_000) + "/s")
+    XCTAssertEqual(DeviceTransferDetails.speedLabel(copying, at: 12.5), "0 B/s")
+  }
+
+  @MainActor func testDeviceResultCountsSavedPairEvenIfCopyCleanupFails() async throws {
+    let file = try XCTUnwrap(USBMonitor.files(volume).files.first)
+    let sync = SyncCoordinator(store: store)
+    try await sync.load()
+    sync.onArchived = { recording in
+      let local = self.store.root.appendingPathComponent(recording.folder)
+        .appendingPathComponent("original.opus")
+      try? Data(repeating: 12, count: 800).write(to: local)
+    }
+    sync.updateUSB([file], stableFiles: [file], volumes: [volume], complete: true)
+    try await settle(sync)
+    XCTAssertTrue(sync.cleanupFailed)
+    XCTAssertEqual(sync.deviceRun.saved, 1)
+    XCTAssertEqual(sync.deviceRun.deleted, 0)
+    XCTAssertTrue(FileManager.default.fileExists(atPath: wav.path))
+    sync.updateUSB([], stableFiles: [], volumes: [])
+    XCTAssertEqual(sync.deviceRun.saved, 0)
   }
 }

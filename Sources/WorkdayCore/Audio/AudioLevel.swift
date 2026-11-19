@@ -37,13 +37,14 @@ public final class CardAudioMeter {
   private let input = AsyncStream<Chunk>.makeStream(bufferingPolicy: .bufferingNewest(8))
   private let worker: Task<Void, Never>
 
-  public init(onLevel: @escaping @MainActor @Sendable (Int, Date) -> Void) {
+  public init(input audioInput: CaptionAudioInput = .cardOpus, onLevel: @escaping @MainActor @Sendable (Int, Date) -> Void) {
     let stream = input.stream
     worker = Task.detached(priority: .utility) {
       guard let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1) else {
         return
       }
-      var decoder: CardOpusDecoder?
+      let packet = audioInput.packetBytes
+      var decoder: CaptionAudioDecoder?
       var envelope = AudioLevelEnvelope()
       var remainder = Data()
       var expected: Int?
@@ -56,17 +57,17 @@ public final class CardAudioMeter {
           decoder = nil
           envelope = AudioLevelEnvelope()
           remainder.removeAll(keepingCapacity: true)
-          skip = (40 - chunk.offset % 40) % 40
+          skip = (packet - chunk.offset % packet) % packet
         }
         let skipped = min(skip, data.count)
         data = Data(data.dropFirst(skipped))
         skip -= skipped
         expected = chunk.offset + chunk.data.count
         remainder.append(data)
-        let count = remainder.count / 40 * 40
+        let count = remainder.count / packet * packet
         guard count > 0 else { continue }
         do {
-          if decoder == nil { decoder = try CardOpusDecoder(outputFormat: format) }
+          if decoder == nil { decoder = try CaptionAudioDecoder(input: audioInput, outputFormat: format) }
           guard let pcm = try decoder?.decode(remainder.prefix(count)) else { continue }
           remainder.removeFirst(count)
           guard let samples = pcm.floatChannelData?[0] else { continue }

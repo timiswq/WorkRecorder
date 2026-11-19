@@ -41,9 +41,14 @@ struct CaptionBubbleContent: View {
   }
 
   var body: some View {
-    CaptionReveal(progress: caption.isSoundFeedback ? 0 : CaptionReveal.envelope(expansion), collapsed: CGSize(width: 14, height: 14)) {
+    let cueWidth: CGFloat = caption.inputLabel == nil ? 14 : (caption.inputLabel == .microphone ? 84 : 58)
+    CaptionReveal(progress: caption.isSoundFeedback ? 0 : CaptionReveal.envelope(expansion), collapsed: CGSize(width: cueWidth, height: 14)) {
       if caption.isSoundFeedback {
-        Color.clear.frame(width: 14, height: 14)
+        HStack(spacing: 6) {
+          if let label = caption.inputLabel { sourceLabel(label) }
+          Color.clear.frame(width: 14, height: 14)
+        }
+        .frame(width: cueWidth, height: 14, alignment: .leading)
       } else {
         transcript.opacity(CaptionReveal.ink(expansion) * inkOpacity)
       }
@@ -64,8 +69,20 @@ struct CaptionBubbleContent: View {
     }
     .accessibilityElement(children: .ignore)
     .accessibilityAddTraits(.isStaticText)
-    .accessibilityLabel(caption.isSoundFeedback ? "正在听取" :
-      (preview ? "弹幕预览，\(username)，\(caption.text)" : "\(username)，\(caption.text)"))
+    .accessibilityLabel(spokenLabel)
+  }
+
+  private var spokenLabel: String {
+    var parts = [String]()
+    if preview { parts.append("弹幕预览") }
+    if let source = caption.inputLabel { parts.append(source.rawValue) }
+    if caption.isSoundFeedback {
+      parts.append("正在听取")
+    } else {
+      if caption.inputLabel != .microphone { parts.append(username) }
+      parts.append(caption.text)
+    }
+    return parts.joined(separator: "，")
   }
 
   @ViewBuilder private var soundLevel: some View {
@@ -73,11 +90,22 @@ struct CaptionBubbleContent: View {
     else { Image(systemName: "waveform").font(.system(size: 13)).foregroundStyle(.white) }
   }
 
+  private func sourceLabel(_ label: CaptionInputLabel) -> some View {
+    Text(label.rawValue).font(.system(size: 11, weight: .semibold))
+      .foregroundStyle(.white).lineLimit(1).fixedSize()
+  }
+
   private var transcript: some View {
-    CaptionBubbleLayout(keepsNumber: CaptionTypography.isNumberedSpeaker(username), fixedWidth: caption.reservesReadingWidth) {
-      Text(CaptionTypography.displayName(username))
-        .font(.system(size: 11, weight: .semibold)).lineLimit(1)
-        .foregroundStyle(increasedContrast ? .white : (caption.isMine ? Palette.captionName : .white.opacity(0.88)))
+    CaptionBubbleLayout(keepsHeaderWidth: caption.inputLabel != nil || CaptionTypography.isNumberedSpeaker(username),
+                        fixedWidth: caption.reservesReadingWidth) {
+      HStack(spacing: 6) {
+        if let label = caption.inputLabel { sourceLabel(label) }
+        if caption.inputLabel != .microphone {
+          Text(CaptionTypography.displayName(username))
+            .font(.system(size: 11, weight: .semibold)).lineLimit(1)
+            .foregroundStyle(increasedContrast ? .white : (caption.isMine ? Palette.captionName : .white.opacity(0.88)))
+        }
+      }
       HStack(spacing: 8) {
         if let time = caption.receivedAt {
           Text(CaptionTime.seconds.string(from: time))
@@ -180,14 +208,14 @@ struct CaptionReveal: Layout {
 /// A short caption needs only a compact header. When the body is wider, the name can use
 /// the spare width while the timestamp and the native action keep their intrinsic sizes.
 private struct CaptionBubbleLayout: Layout {
-  let keepsNumber: Bool
+  let keepsHeaderWidth: Bool
   let fixedWidth: Bool
 
   func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
     let name = subviews[0].sizeThatFits(.unspecified)
     let metadata = subviews[1].sizeThatFits(.unspecified)
     let body = subviews[2].sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
-    let compactName = keepsNumber ? name.width : min(name.width, 72)
+    let compactName = keepsHeaderWidth ? name.width : min(name.width, 72)
     let headerWidth = compactName + (metadata.width > 0 ? 8 : 0) + metadata.width
     return CGSize(width: min(proposal.width ?? .infinity, max(headerWidth, body.width)),
                   height: max(name.height, metadata.height) + 4 + body.height)

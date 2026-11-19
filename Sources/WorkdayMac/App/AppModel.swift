@@ -114,6 +114,7 @@ enum Destination: String, CaseIterable {
   let player = Player()
   @Published private(set) var captionHistory: CaptionHistory
   let captionSelection = LiveCaptionRouter()
+  let microphone: MicrophoneCaptions
   let localCaptions: LivePreview
   private var recordingOffset = 0
   let live: LivePreview
@@ -191,15 +192,13 @@ enum Destination: String, CaseIterable {
 
   init(libraryURL: URL? = nil, inference: (any InferenceServing)? = nil, live: LivePreview? = nil,
        localCaptions: LivePreview? = nil, fileReviewer: (any CaptionFileTranscribing)? = nil,
-       makeWiFiSync: ((ArchiveStore) -> WiFiRecordingSync)? = nil) {
+       microphone: MicrophoneCaptions? = nil, makeWiFiSync: ((ArchiveStore) -> WiFiRecordingSync)? = nil) {
     self.makeWiFiSync = makeWiFiSync
     self.inference = inference
     self.fileReviewer = fileReviewer
     self.live = live ?? LivePreview()
-    self.localCaptions = localCaptions ?? LivePreview(makeLocalStream: {
-      if #available(macOS 26, *) { return AppleCaptionConnection() }
-      return try DictationCaptionConnection()
-    })
+    self.localCaptions = localCaptions ?? .local(input: .cardOpus)
+    self.microphone = microphone ?? MicrophoneCaptions()
     let environment = ProcessInfo.processInfo.environment
     isolated = libraryURL != nil || environment["WORKDAY_LIBRARY"] != nil
     liveVoiceValidation = isolated && environment["WORKDAY_LIVE_VOICE_VALIDATION_ONLY"] == "1"
@@ -358,9 +357,12 @@ enum Destination: String, CaseIterable {
     card.boundID = preferences.selectedRecorderID
     card.preferredKind = preferences.recorderKind
     card.autoConnect = preferences.autoConnect
+    sync.cleanupEnabled = preferences.cleanCardAfterSync
+    wifiSync.cleanupEnabled = preferences.cleanCardAfterSync
     usb.select(card.switchingTo == nil ? selectedUSBSource : nil)
     if preferences.autoSync, !manualSyncVolumes.isEmpty { manualSyncVolumes = [] }
     configureCaptions(service: service)
+    microphone.configure(enabled: preferences.useMacMicrophone && preferences.captions.enabled && !quitting)
     if !preferences.captions.enabled && !liveVoiceValidation { voices.resetLiveAudio() }
     if !preferences.cloudEnabled {
       queuedRecordingRetries.removeAll()
@@ -468,6 +470,7 @@ enum Destination: String, CaseIterable {
   }
 
   private func attachWiFiSync() {
+    wifiSync.cleanupEnabled = preferences.cleanCardAfterSync
     wifiSync.attach()
     wifiSync.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &subscriptions)
     wifiSync.onArchiveChange = { [weak self] in
@@ -613,7 +616,12 @@ enum Destination: String, CaseIterable {
       manualSyncVolumes.contains($0.sourceID)
     }
     let safeToClean = usb.activeFilenameUnknown ? [] : scan.ready
-    sync.updateUSB(eligible, stableFiles: safeToClean, volumes: usb.volumes)
+    let planned = scan.files.filter {
+      !usb.excludedStems.contains($0.stem)
+        && (preferences.autoSync || manualSyncVolumes.contains($0.sourceID))
+    }
+    sync.updateUSB(eligible, stableFiles: safeToClean, volumes: usb.volumes, planned: planned,
+                   complete: scan.inventories.first?.complete == true && !usb.needsSaveConfirmation)
   }
 
   func retrySync() {
@@ -1064,6 +1072,7 @@ enum Destination: String, CaseIterable {
       voices = VoiceRecognition(root: url)
       attachVoices()
       sync = SyncCoordinator(store: store)
+      sync.cleanupEnabled = preferences.cleanCardAfterSync
       sync.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(
         in: &subscriptions)
       attachSync()
@@ -1099,6 +1108,7 @@ enum Destination: String, CaseIterable {
     queuedRecordingRetries.removeAll()
     queuedSummaryRetries.removeAll()
     desktop.stop()
+    microphone.configure(enabled: false)
     voices.stop()
     audioMeter.reset()
     processingTask?.cancel()
@@ -1108,6 +1118,7 @@ enum Destination: String, CaseIterable {
     await wifiSync.shutdown()
     card.disconnect()
     player.stop()
+    await microphone.preview.waitForSpeechActivityToStop()
     await localCaptions.waitForSpeechActivityToStop()
     await live.waitForSpeechActivityToStop()
     await captionHistory.flush()

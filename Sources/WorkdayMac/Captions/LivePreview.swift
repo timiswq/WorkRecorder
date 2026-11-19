@@ -133,24 +133,36 @@ struct PendingCaption: Equatable {
   private var unsentEnd: Int?
   private var timer: Timer?
   private var waitingMessage = "等待设备音频，收到后即开始识别。"
+  private let input: CaptionAudioInput
+  private var packetBytes: Int { input.packetBytes }
+  private var bytesPerMs: Double { Double(input.bytesPerSecond) / 1000 }
   private let clock: () -> Date
   private let makeStream: @MainActor (LiveASRConfiguration) throws -> LiveASRStreaming
   private let makeLocalStream: (@MainActor () throws -> LiveASRStreaming)?
   var isWorking: Bool { phase == .connecting || phase == .recognizing || phase == .finishing }
   var canRetry: Bool { phase == .failed }
-  var receivedSeconds: Double { Double(receivedBytes) / 2000 }
+  var receivedSeconds: Double { Double(receivedBytes) / Double(input.bytesPerSecond) }
 
   init(
+    input: CaptionAudioInput = .cardOpus,
     clock: @escaping () -> Date = Date.init,
     makeLocalStream: (@MainActor () throws -> LiveASRStreaming)? = nil,
     makeStream: @escaping @MainActor (LiveASRConfiguration) throws -> LiveASRStreaming = {
       try QwenLiveConnection(configuration: $0)
     }
   ) {
+    self.input = input
     self.makeLocalStream = makeLocalStream
     self.clock = clock
     self.makeStream = makeStream
   }
+  static func local(input: CaptionAudioInput) -> LivePreview {
+    LivePreview(input: input, makeLocalStream: {
+      if #available(macOS 26, *) { return AppleCaptionConnection(input: input) }
+      return try DictationCaptionConnection(input: input)
+    })
+  }
+
   func configure(enabled: Bool, service: AIService?, model: LiveASRModel = .streaming) {
     let config = service.map { LiveASRConfiguration(key: $0.key, model: model) }
     guard self.enabled != enabled || configuration != config else { return }
@@ -175,9 +187,9 @@ struct PendingCaption: Equatable {
   }
   private var streamByteLimit: Int {
     if makeLocalStream != nil {
-      if #unavailable(macOS 26) { return 100_000 }
+      if #unavailable(macOS 26) { return 50 * input.bytesPerSecond }
     }
-    return 1_200_000
+    return 600 * input.bytesPerSecond
   }
   func append(_ data: Data, recordingOffset: Int? = nil) {
     guard enabled, makeLocalStream != nil || configuration != nil, !data.isEmpty else { return }
@@ -191,7 +203,7 @@ struct PendingCaption: Equatable {
     if makeLocalStream != nil, !feedbackPaused {
       if activity == nil {
         let generation = activityGeneration
-        activity = CardSpeechActivity(onEvent: { [weak self] event in
+        activity = CardSpeechActivity(input: self.input, onEvent: { [weak self] event in
           guard let self, self.activityGeneration == generation else { return }
           self.receiveActivity(event)
         }, onConfirmedPause: { [weak self] quiet in
@@ -211,7 +223,7 @@ struct PendingCaption: Equatable {
     var input = data
     var inputOffset = offset
     if let active, let session = sessions[active], session.finishAfterPacket || session.bytes >= streamByteLimit {
-      let needed = (40 - session.bytes % 40) % 40
+      let needed = (packetBytes - session.bytes % packetBytes) % packetBytes
       let tail = min(needed, input.count)
       if tail > 0 {
         appendToActive(input.prefix(tail))
@@ -236,7 +248,7 @@ struct PendingCaption: Equatable {
         if unsentEnd == inputOffset {
           inputOffset -= unsentAudio.count
           input = unsentAudio + input
-          let skip = min(input.count, (40 - inputOffset % 40) % 40)
+          let skip = min(input.count, (packetBytes - inputOffset % packetBytes) % packetBytes)
           input = input.dropFirst(skip)
           inputOffset += skip
           if input.isEmpty {
@@ -278,8 +290,8 @@ struct PendingCaption: Equatable {
     let end = offset + data.count
     unsentEnd = end
     let start = end - unsentAudio.count
-    let earliest = max(start, end - 12_000) // Six seconds at the card's fixed bitrate.
-    let aligned = ((earliest + 39) / 40) * 40
+    let earliest = max(start, end - 6 * input.bytesPerSecond)
+    let aligned = ((earliest + packetBytes - 1) / packetBytes) * packetBytes
     unsentAudio.removeFirst(min(unsentAudio.count, aligned - start))
   }
   private func clearUnsentAudio() {
@@ -406,9 +418,9 @@ struct PendingCaption: Equatable {
           quiet.lowerBound >= session.recordingOffset else { return true }
     // A queued VAD result must not close a stream that already contains new
     // speech. Wait until every complete packet currently held has been checked.
-    let completeEnd = session.recordingOffset + session.bytes / 40 * 40
+    let completeEnd = session.recordingOffset + session.bytes / packetBytes * packetBytes
     guard quiet.upperBound >= completeEnd, sessions.count == 1 else { return false }
-    if session.bytes.isMultiple(of: 40) { finishActive() }
+    if session.bytes.isMultiple(of: packetBytes) { finishActive() }
     else { sessions[active]?.finishAfterPacket = true }
     return true
   }
@@ -504,8 +516,8 @@ struct PendingCaption: Equatable {
       guard previous?.isFinal != true || isFinal else { return }
       let endTime = end ?? words?.last?.endMs
       let textEnd: Int? = endTime.flatMap { ms in
-        guard ms.isFinite, ms >= 0, ms <= Double(session.bytes) / 2 + 1 else { return nil }
-        return session.recordingOffset + Int(ms * 2)
+        guard ms.isFinite, ms >= 0, ms <= Double(session.bytes) / bytesPerMs + 1 else { return nil }
+        return session.recordingOffset + Int(ms * bytesPerMs)
       }
       let spoken = LiveLine.containsSpeech(text)
       let coversPending = pendingSpeech.map { pending in
@@ -527,8 +539,8 @@ struct PendingCaption: Equatable {
         textSource: makeLocalStream == nil ? .cloud : .local)
       line.bubblePhrase = (session.stream as? AppleBubbleStreaming)?.bubblePhrase(for: number)
       if let start = start ?? words?.first?.startMs, start.isFinite, start >= 0,
-         let end = textEnd, start < Double(session.bytes) / 2 + 1 {
-        let begin = session.recordingOffset + Int(start * 2)
+         let end = textEnd, start < Double(session.bytes) / bytesPerMs + 1 {
+        let begin = session.recordingOffset + Int(start * bytesPerMs)
         if begin < end { line.recognitionRange = begin..<end }
       }
       if makeLocalStream == nil, spoken || previous != nil {
@@ -545,9 +557,9 @@ struct PendingCaption: Equatable {
       let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       let acceptsLine = previous != nil || isFinal || hasText
       if isFinal, let start = start ?? words?.first?.startMs, let end = end ?? words?.last?.endMs,
-        start >= 0, end > start, end <= Double(session.bytes) / 2 + 1 {
-        let lower = session.recordingOffset + Int(start * 2)
-        let upper = session.recordingOffset + Int(end * 2)
+        start >= 0, end > start, end <= Double(session.bytes) / bytesPerMs + 1 {
+        let lower = session.recordingOffset + Int(start * bytesPerMs)
+        let upper = session.recordingOffset + Int(end * bytesPerMs)
         line.recordingRange = lower..<upper
         if cacheCaptionAudio && spoken {
           line.replay = CaptionReplay(audio: session.packets, startMs: start, endMs: end)
@@ -558,8 +570,8 @@ struct PendingCaption: Equatable {
       }
       var evidence: (Data, Double)?
       var draftPackets: Data?
-      if spoken, let start = start ?? words?.first?.startMs, let end = endTime,
-         start.isFinite, end.isFinite, start >= 0, end > start, end <= Double(session.bytes) / 2 + 1 {
+      if onVoice != nil || onDraftVoice != nil, spoken, let start = start ?? words?.first?.startMs, let end = endTime,
+         start.isFinite, end.isFinite, start >= 0, end > start, end <= Double(session.bytes) / bytesPerMs + 1 {
         let lower = Int(ceil(start / 20)) * 40
         let upper = Int(floor(end / 20)) * 40
         if SpeakerEncoder.acceptsLivePacketCount(upper - lower), lower >= session.firstByte,

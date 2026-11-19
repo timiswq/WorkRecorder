@@ -9,6 +9,8 @@ name = b"20261116123456"
 audio = bytes((i * 31 + 7) % 256 for i in range(20000))
 if scenario in ("sync", "repeat"):
     audio = Path(__file__).with_name("silence.bin").read_bytes()
+elif scenario == "invalid":
+    audio = b"\xff" * 4096
 head, tail = b"XnoteWifiHead  ", b"XnoteWifiTail   "
 
 
@@ -60,8 +62,8 @@ with socket.socket() as server:
     server.settimeout(8)
     print(server.getsockname()[1], flush=True)
     with connect(server, 2048 if scenario == "resume" else 0) as sock:
-        if scenario in ("sync", "repeat"):
-            if scenario == "sync":
+        if scenario in ("sync", "repeat", "invalid"):
+            if scenario != "repeat":
                 sock.sendall(frame(11, audio) + frame(11, b"\2"))
             assert read_command(sock, 33) == b""
         elif scenario == "resume":

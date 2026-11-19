@@ -12,10 +12,13 @@ import WorkdayCore
   private var reader: CardAudioMeter?
   private var generation = 0
 
+  private let input: CaptionAudioInput
+  init(input: CaptionAudioInput = .cardOpus) { self.input = input }
+
   func append(_ data: Data, offset: Int) {
     if reader == nil {
       let token = generation
-      reader = CardAudioMeter { [weak self] segments, at in
+      reader = CardAudioMeter(input: input) { [weak self] segments, at in
         guard let self, token == self.generation else { return }
         self.sample = Sample(segments: segments, at: at)
       }

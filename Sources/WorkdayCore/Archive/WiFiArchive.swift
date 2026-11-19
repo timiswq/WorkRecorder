@@ -39,23 +39,44 @@ extension ArchiveStore {
     return pending.sorted { $0.path < $1.path }
   }
 
-  public func verifiedWiFiKeys() throws -> Set<String> {
+  public func verifiedWiFiKeys(matching candidates: Set<String>? = nil) throws -> Set<String> {
+    if candidates?.isEmpty == true { return [] }
     var keys = Set<String>()
     for row in try load() {
-      guard let original = row.wifiOriginal else { continue }
-      let directory = root.appendingPathComponent(row.folder)
-      if (try? Files.hash(directory.appendingPathComponent(WiFiOriginal.filename)))
-        == original.sha256,
-        (try? Files.hash(directory.appendingPathComponent(row.originalFile))) == row.sha256
-      {
+      try Task.checkCancellation()
+      guard let original = row.wifiOriginal, candidates?.contains(original.key) != false else { continue }
+      if (try? verifyWiFiArchive(row)) != nil {
         keys.insert(original.key)
       }
     }
     return keys
   }
 
+  /// Recheck both archival files before the device copy can be removed.
+  public func verifyWiFiArchive(_ row: Recording) throws {
+    let library = root.standardizedFileURL.resolvingSymlinksInPath()
+    let directory = library.appendingPathComponent(row.folder).resolvingSymlinksInPath()
+    let failure = WorkdayError.invalid("Mac 上的录音原件校验失败，已保留卡内副本")
+    guard let original = row.wifiOriginal, directory.path.hasPrefix(library.path + "/"),
+      row.originalFile == "original.wav"
+    else { throw failure }
+    let raw = directory.appendingPathComponent(WiFiOriginal.filename)
+    let wav = directory.appendingPathComponent("original.wav")
+    let rawStamp = try FileStamp(raw)
+    let wavStamp = try FileStamp(wav)
+    guard rawStamp.size == original.bytes, wavStamp.size == row.bytes,
+      try Files.hash(raw) == original.sha256, try Files.hash(wav) == row.sha256,
+      try FileStamp(raw) == rawStamp, try FileStamp(wav) == wavStamp
+    else { throw failure }
+  }
+
   /// Only consume an END-committed download. The incoming bin remains available after any failure.
   public func archiveWiFiFile(_ url: URL) throws -> Recording {
+    try archiveWiFiFileWithOutcome(url).recording
+  }
+
+  /// A repaired archive counts as saved. Rechecking two intact local files leaves the count unchanged.
+  public func archiveWiFiFileWithOutcome(_ url: URL) throws -> (recording: Recording, saved: Bool) {
     let fm = FileManager.default
     let directory = url.deletingLastPathComponent()
     let name = url.deletingPathExtension().lastPathComponent.split(separator: "_")
@@ -102,6 +123,7 @@ extension ArchiveStore {
       guard existing.id == id, existing.wifiOriginal == original, existing.sha256 == wavHash,
         existing.originalFile == "original.wav"
       else { throw WorkdayError.invalid("已有归档与录音原件不一致") }
+      var repaired = false
       for (source, hash) in [(bin, rawHash), (wav, wavHash)] {
         let target = destination.appendingPathComponent(source.lastPathComponent)
         if (try? Files.hash(target)) != hash {
@@ -111,15 +133,16 @@ extension ArchiveStore {
           } else {
             try fm.moveItem(at: source, to: target)
           }
+          repaired = true
         }
       }
-      return existing
+      return (existing, repaired)
     }
     try Files.writeJSON(item, to: stage.appendingPathComponent("recording.json"))
     try fm.createDirectory(
       at: destination.deletingLastPathComponent(), withIntermediateDirectories: true,
       attributes: [.posixPermissions: 0o700])
     try fm.moveItem(at: stage, to: destination)
-    return item
+    return (item, true)
   }
 }

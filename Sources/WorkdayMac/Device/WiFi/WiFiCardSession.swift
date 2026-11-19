@@ -19,12 +19,14 @@ final class WiFiCardSession: NSObject, CBPeripheralDelegate {
   var onAudioAvailable: (Bool) -> Void = { _ in }
   var onHotspot: (HotspotCredentials) -> Void = { _ in }
   var onSocket: () -> Void = {}
+  var onFilePacket: (Packet) -> Void = { _ in }
   var onFailure: (String) -> Void = { _ in }
   private var control: CBCharacteristic?
   private var audio: CBCharacteristic?
   private var output: CBCharacteristic?
   private var subscriptions: [CBCharacteristic] = []
   private var parser = BLEParser()
+  private let fileList = BluetoothRecordingList()
   private var writes: [Data] = []
   private var writing = false
   private var openRequest = false
@@ -91,9 +93,25 @@ final class WiFiCardSession: NSObject, CBPeripheralDelegate {
     send(27, [1])
   }
   func handoff() { send(12) }
+  @MainActor func readFileList(when ready: () -> Bool) async throws -> [RecordingEntry] {
+    try await fileList.read {
+      guard ready(), self.active, self.output != nil else { return false }
+      self.send(10)
+      return true
+    }
+  }
+  func deleteFile(_ file: RecordingEntry) -> Bool {
+    guard active, output != nil, file.supportsCardCleanup else { return false }
+    send(13, file.wireName)
+    return true
+  }
   private func send(_ key: UInt8, _ payload: [UInt8] = []) {
     guard active else { return }
-    writes.append(Wire.ble(.b3085, key, payload))
+    let frame = Wire.ble(.b3085, key, payload)
+    // The control characteristic supports writes as small as 20 bytes.
+    for start in stride(from: 0, to: frame.count, by: 20) {
+      writes.append(frame.subdata(in: start..<min(start + 20, frame.count)))
+    }
     pump()
   }
   private func pump() {
@@ -121,13 +139,19 @@ final class WiFiCardSession: NSObject, CBPeripheralDelegate {
   func peripheral(
     _ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?
   ) {
-    guard active, characteristic === control || characteristic === audio,
-      let data = characteristic.value, error == nil else { return }
+    guard active, characteristic === control || characteristic === audio else { return }
+    guard let data = characteristic.value, error == nil else {
+      if characteristic === control { fileList.invalidate("蓝牙清单接收中断。") }
+      return
+    }
     if characteristic === audio {
       onAudio(data)
       return
     }
-    for frame in parser.feed(data) where frame.profile == .b3085 {
+    let rejected = parser.rejectedCRC
+    let frames = parser.feed(data)
+    if rejected != parser.rejectedCRC { fileList.invalidate("蓝牙清单校验失败。") }
+    for frame in frames where frame.profile == .b3085 {
       let payload = frame.payload
       // 录音应答可只有成功状态字节，也可附 14 字节的文件名和固件扩展字段。
       if let event = WiFiRecordingEvent(rawValue: frame.key), payload.first == 0,
@@ -135,11 +159,15 @@ final class WiFiCardSession: NSObject, CBPeripheralDelegate {
       {
         let name = payload.count >= 15
           ? String(bytes: payload[1..<15].prefix { $0 != 0 }, encoding: .utf8) : nil
+        fileList.invalidate("录音状态已改变，请重新读取清单。")
         onRecordingEvent(event, name)
       }
       switch frame.key {
       case 5:
-        if let report = WiFiCardStatus(payload) { onState(report) }
+        if let report = WiFiCardStatus(payload) {
+          if report.recordingCode != 0 { fileList.invalidate("请在录音保存后读取清单。") }
+          onState(report)
+        }
       case 31: credentials = try? HotspotCredentials(payload)
       case 27 where openRequest:
         guard payload.first == 0 else {
@@ -149,6 +177,8 @@ final class WiFiCardSession: NSObject, CBPeripheralDelegate {
         }
         openConfirmed = true
       case 32: onSocket()
+      case 10: fileList.accept(payload)
+      case 13: onFilePacket(frame)
       default: break
       }
       // 热点开启应答和凭据可先后互换，二者都属于本次蓝牙连接才可切网。
@@ -160,6 +190,7 @@ final class WiFiCardSession: NSObject, CBPeripheralDelegate {
   }
   func close() {
     active = false
+    fileList.close()
     writes.removeAll()
     subscriptions.removeAll()
     credentials = nil
